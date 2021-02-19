@@ -1,0 +1,250 @@
+---
+title: "USGS Chemistry"
+author: "John Harley"
+date: "12/15/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require(tidyverse)
+require(here)
+require(seacarb)
+require(dataRetrieval)
+require(ggmap)
+require(sf)
+require(leaflet)  
+require(kable)
+require(kableExtra)
+require(leaflet)  
+
+alk <-  read_csv(here("USGS_Data","USGS_ALL_DIC_FOR_PHREEQC_mbEdits.csv"))
+```
+
+## USGS Chemistry data
+# Subsetting and GIS
+I got the largely USGS dataset on alkalinity, pH and temp from Mariela who in turn got them from Sarah Stackpoole. The data are in a csv with the columns being:
+
+```{r, echo=FALSE}
+head(alk) %>%
+  kbl()  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+This is a pretty extensive dataset of 7500 observations over > 5 decades. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+alk %>%
+  mutate(Date = as.Date(DATE, format = "%m/%d/%Y")) %>%
+  ggplot(aes(x=Date, y=mean_daily_alk_mgl_asCaCO3)) +
+  geom_point(alpha=0.3) +
+  scale_y_log10() +
+  theme_bw() +
+  labs(y="Mean daily alkalinity as CaCO3 (mg/L)")
+```
+# Where are the sites
+Since the data didn't come with any associated metadata, I used the USGS R package *dataRetrieval* to extract all USGS sites within a bounding box. In this case I used a bounding box of long=(-140 to -130) and lat(54 to 60) which should capture all of SEAK including Yakutat.
+```{r, echo=FALSE}
+sitesInitial <- whatNWISsites(bBox=c(-137,54,-130.0,60), 
+                       parameterCd="00400")
+sitesSupplemental <- whatNWISsites(bBox=c(-140,56,-137.0,64), 
+                       parameterCd="00400")
+sites <- bind_rows(sitesInitial, sitesSupplemental)
+
+head(sites) %>%
+  kbl()  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+Now we have associated metadata for each site, and we merge our observation data with this metadata to only include stations from Southeast Alaska. Here are those sites on a map. I'll plot it on the map of the SEAKDB watersheds here, but I'll highlight the actual watersheds below.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+SEAKDB <- read_sf(here("SEAKDB","USFS_Southeast_Alaska_Drainage_Basin__SEAKDB__Watersheds.shp"))
+
+alk %>%
+  mutate(site_no = as.character(site_no)) %>%
+  left_join(sites, by="site_no") %>%
+  select(site_no, lat = dec_lat_va, lon = dec_long_va) -> sites_withC
+
+ggplot(data = SEAKDB) +
+  geom_sf(alpha=0.7) +
+  theme_bw() +
+  geom_point(aes(x=lon, y=lat), data = sites_withC, color="#00fbff") +
+  labs(title = "USGS sites with alkalinity data (all sites)") 
+```
+
+I'm also going to limit the data we use and only include data (for the purposes of training a model) from sites that have consistent sampling (i.e. more than 5 observations in a single year). This leaves us with 33 sites in SEAK. I highlighted the watershed that each USGS site corresponded to operating on two assumptions. 
+
+1. If the USGS site lat/lon was inside a SEAKDB polygon, those data correspond to that watershed.
+2. Sites that weren't inside a polygon were matched to the nearest polygon. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+alk %>%
+  mutate(Date = as.Date(DATE, format = "%m/%d/%Y")) %>%
+  mutate(Year = lubridate::year(Date)) %>%
+  mutate(site_no = as.character(site_no)) %>%
+  group_by(Year, site_no) %>%
+  add_tally() %>%
+  filter(n > 5) %>%
+  ungroup() %>%
+  left_join(sites, by="site_no") %>%
+  select(site_no, latitude = dec_lat_va, longitude = dec_long_va) %>%
+  distinct(site_no, latitude, longitude) %>%
+  filter(!is.na(longitude)) -> consistent_sites
+
+sites_sf <- st_as_sf(consistent_sites, coords = c("longitude", "latitude"), crs = st_crs(SEAKDB), agr = "constant")
+
+intersection <- st_within(sites_sf, SEAKDB)
+
+closest <- list()
+for(i in seq_len(nrow(sites_sf))){
+  closest[[i]] <- SEAKDB[which.min(
+    st_distance(SEAKDB, sites_sf[i,])),]
+}
+
+bind_rows(closest) %>%
+  pull(OBJECTID) -> highlighSheds
+
+toFilter <- c(unlist(intersection), highlighSheds)
+
+SEAKDB %>%
+  mutate(highlight = ifelse(OBJECTID %in% toFilter, "data", "nodata")) -> SEAKDB
+
+factpal <- colorFactor(topo.colors(2), SEAKDB$highlight)
+
+SEAKDB %>%
+  filter(highlight == "data") %>%
+  leaflet() %>%
+  addPolygons(fillColor = ~"#d694ff", fillOpacity = 0.8, smoothFactor = 0.5, color="black") %>%
+  addProviderTiles("CartoDB.Positron")
+
+```
+
+## DIC calculations 
+# Seacarb comparisons with CO2Sys
+
+There are a number of packages to calculate DIC from the various components of the carbonate system, the main package for R is *seacarb*, however this package is somewhat limited in its references to freshwater systems. In order to QA/QC some of these calculations, I first wanted to see what the difference was between using a salinity of 0 (S=0) versus a salinity of 1 (S=1), which is the lowest salinity value. Constant values in this case are derived from [Waters et al. (2014)](https://miami.pure.elsevier.com/en/publications/corrigendum-to-the-free-proton-concentration-scale-for-seawater-p-2) which is the default for *seacarb*.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+alk %>%
+  #left_join(sites, by="site_no") %>%
+  #filter(dec_lat_va  > 0) %>% # TA = TA.*(1/1000)*(1/100.09)*2*10^6; % Conversion to umol/kg; factor of 2 related to carbonate -2 charge
+  mutate(alkMol = mean_daily_alk_mgl_asCaCO3 *  19.98264) -> southeast_chemistry
+
+s1 <- carb(flag = 8, var1 = southeast_chemistry$mean_daily_pH, var2 = southeast_chemistry$alkMol, S=1, T  = southeast_chemistry$mean_daily_tempC, k1k2 = "w14") %>%
+  mutate(S = "1")
+
+s0 <- carb(flag = 8, var1 = southeast_chemistry$mean_daily_pH, var2 = southeast_chemistry$alkMol, S=0, T  = southeast_chemistry$mean_daily_tempC, k1k2 = "w14") %>%
+  mutate(S = "0")
+
+bind_cols(S1 = s1$DIC, S0 = s0$DIC) %>%
+  mutate(Percentdiffernce = (1-(S1/S0))*100) %>%
+  summarise(avgPercent = median(Percentdiffernce, na.omit=TRUE)) -> annotateLayer
+# plot comparison of S
+bind_cols(S1 = s1$DIC, S0 = s0$DIC) %>%
+  ggplot(aes(x=S1, y=S0)) +
+  geom_point(alpha=0.2) +
+  geom_abline() +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_bw() +
+  labs(y="DIC where S=0", x="DIC where S=1", title="DIC calculation", subtitle = "using Waters et al. (2014)") +
+  annotate(geom = "text", x=20, y=1190, label = paste0("average difference ", round(annotateLayer$avgPercent), "%"), hjust=0)
+```
+
+There is some disagreement between DIC estimated for S=0 and S=1, which is unsurprising. However I wanted to get a sense for how the values from Waters et al. (2014) compared to the only source that was available for freshwater, [Millero 1979](https://www.sciencedirect.com/science/article/abs/pii/001670379400354O). Unfortunately that reference is not available in *seacarb* however it is available in Matlab *CO2SYS*. I don't have Matlab so I had Mariela calculate the values using that reference and I compared them to the values calculated at S=0 using Waters et al. (2014).
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+DIC <- read.table("AKriverChemistry_072920.txt", sep = "\t", header = TRUE)
+
+# make comparison
+DIC %>%
+  bind_cols(s0) %>%
+  mutate(Percentdiffernce = (1-(DIC/calcDIC_umol_kg))*100) -> comparisonData
+# plot comparison
+comparisonData %>%  
+  ggplot(aes(x=calcDIC_umol_kg, y=DIC)) +
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_abline() +
+  theme_bw() +
+  labs(y="DIC where S=0 using Waters et al. (2014)", x="DIC where S=0 Millero et al. (1979)", title="DIC calculation", 
+       subtitle = "Waters (2014) vs. Millero (1979)") +
+  annotate(geom = "text", x=20, y=1190, label = paste0("average difference ", round(mean(comparisonData$Percentdiffernce),2), "%"), hjust=0)
+
+```
+
+The difference between the calculations here is extremely minimal. I would suggest we use the calculations from Waters et al. (2014) going forward, both because it is reproducible in R and because it is a more recent source.
+
+
+## Getting Discharge Data
+```{r, echo=FALSE}
+
+
+get_stream_data <- function(data, ouput=TRUE) {
+
+  # defining which variables we want
+  pCode <- "00060" # this corresponds to daily discharge
+  start.date <- "1943-01-01" # this is a super fast API, we can extract as much data as we want
+  end.date <- Sys.Date() # make sure it's up to date
+
+  data %>%
+    ungroup() %>%
+    select(stream_site_no) %>%
+    na.omit() %>%
+    unique() %>%
+    filter(nchar(as.character(stream_site_no)) > 7) %>%
+    .[[1]] %>%
+    as.character() %>%
+    as.list() -> USsiteNos
+
+  
+  # importing the data #
+  dataRetrieval::readNWISdv(siteNumbers = unlist(USsiteNos),
+                      parameterCd = pCode,
+                      startDate = start.date,
+                      endDate = end.date) %>%
+  left_join(dataRetrieval::readNWISsite(USsiteNos), by="site_no") %>%
+  select(site_no, Date, discharge=X_00060_00003, station_nm, 
+         stream_name=station_nm) -> streams
+  # removing erroneous values #
+  streams$discharge[streams$discharge < 0] <- NA
+  
+  streams$Date <- as.Date(streams$Date)
+  if(missing(ouput)) { 
+    NULL 
+    } else {
+  if(output=="TRUE") {
+    stream_data <<- streams
+  } else {
+    NULL
+  }
+    }
+  data %>%
+    mutate(Date=as.Date(Date)) %>%
+  left_join(streams, by=c("stream_site_no"="site_no", "Date")) %>%
+  return()
+
+}
+
+southeast_chemistry %>%
+  bind_cols(s0) %>%
+  mutate(Date = as.Date(DATE, format="%m/%d/%Y")) %>%
+  mutate(stream_site_no = STAID) -> toDischarge
+
+
+tmp <- get_stream_data(southeast_chemistry)  
+
+tmp %>%
+  mutate(Year = lubridate::year(Date)) %>%
+  #filter(!is.na(discharge)) %>%
+  group_by(stream_name, Year) %>%
+  tally() %>%
+  filter(n > 5) %>%
+  group_by(stream_name) %>%
+  tally(name = "YearsofData") 
+```
+

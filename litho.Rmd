@@ -1,0 +1,119 @@
+---
+title: "Lithology"
+author: "John Harley"
+date: "1/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require(tidyverse)
+require(here)
+require(seacarb)
+require(dataRetrieval)
+require(ggmap)
+require(sf)
+require(leaflet)  
+require(kable)
+require(kableExtra)
+require(leaflet)  
+require(factoextra)
+require(FactoMineR)
+
+here::here()
+
+lithology <- read_sf(here("lithology", "GLiM.shp"))
+```
+
+## Soil type map
+
+```{r, echo=FALSE}
+SEAKDB <- read_sf(here("SEAKDB","USFS_Southeast_Alaska_Drainage_Basin__SEAKDB__Watersheds.shp"))
+
+ggplot(lithology) +
+  geom_sf(aes(fill=Litho)) +
+  guides(fill=FALSE) +
+  ggsave("soilmap.png", height=10, width=10, dpi=300)
+
+```
+
+# Intersections
+
+
+```{r, echo=FALSE}
+SEAKDB <- st_transform(SEAKDB, crs = "+proj=aea +lat_1=55 +lat_2=65 +lat_0=50 +lon_0=-154 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs") 
+
+
+lithology <- st_transform(lithology, crs = "+proj=aea +lat_1=55 +lat_2=65 +lat_0=50 +lon_0=-154 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m")
+
+
+# use only first level designations from GLiM
+lithology <- lithology %>%
+  mutate(Litho = substr(Litho, 0, 2))
+
+# make the shapefiles valid (remove clipping etc)
+SEAKDB <- st_make_valid(SEAKDB)
+lithology <- st_make_valid(lithology)
+
+pi <- st_intersection(SEAKDB, lithology)
+
+attArea <- pi %>% 
+  mutate(area = st_area(.) %>% as.numeric())
+
+attArea %>% 
+  as_tibble() %>% 
+  group_by(Litho) %>%
+  summarise(Area = sum(area)) %>%
+  ungroup() %>%
+  mutate(totalArea = sum(Area)) %>%
+  mutate(AreaPercent = Area/totalArea) %>%
+  ggplot(aes(x=Litho, y=AreaPercent, fill=Litho)) +
+  geom_col() +
+  scale_y_continuous(labels=scales::percent) +
+  ggsave("litho.png", height=6, width=10, dpi=300)
+
+totalArea <- as.symbol("totalArea")
+
+SEAKDB %>%
+  filter(!(OBJECTID %in% attArea$OBJECTID)) %>%
+  as_tibble() %>%
+  summarise(sumArea = sum(Hectares))
+  
+attArea %>% 
+  as_tibble() %>%
+  select(OBJECTID.SEAKDB = OBJECTID.1, Litho, area) %>%
+  group_by(OBJECTID.SEAKDB) %>%
+  mutate(totalArea = sum(area)) %>%
+  pivot_wider(names_from = Litho, values_from = area, values_fn = median) %>%
+  mutate(across(everything(), ~replace_na(.x, 0))) %>%
+  mutate(across(-totalArea, ~ . / !! totalArea) * 100) %>%
+  select(-totalArea) %>% 
+  filter(sc > 0)
+  ungroup() %>%
+  select(-OBJECTID.SEAKDB) -> lithoPCA
+
+res.hcpc <- PCA(lithoPCA, graph = TRUE)
+
+fviz_cluster(res.hcpc,
+             repel = TRUE,            
+             show.clust.cent = TRUE, 
+             palette = "jco",        
+             ggtheme = theme_minimal(),
+             main = "Factor map")
+
+
+lithology <- st_transform(lithology, crs = '+proj=longlat +datum=WGS84')
+
+pal <- colorFactor(
+  palette = "Dark2",
+  domain = lithology$xx
+)
+
+
+lithology %>%
+  mutate(xx = as.factor(xx)) %>%
+  leaflet() %>%
+  addPolygons(fillColor = ~pal(xx), fillOpacity = 0.8, smoothFactor = 0.5, color = NULL) %>%
+  addProviderTiles("CartoDB.Positron")
+```
+
+`sc = flag that`
