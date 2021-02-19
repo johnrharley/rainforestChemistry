@@ -1,0 +1,118 @@
+---
+title: "Watershed Analysis"
+author: "John Harley"
+date: "12/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require(tidyverse)
+require(here)
+require(seacarb)
+require(dataRetrieval)
+require(ggmap)
+require(sf)
+require(leaflet)  
+require(kable)
+require(kableExtra)
+require(leaflet)
+require(readxl)
+require(FactoMineR)
+require(factoextra)
+# seakDB polygons
+SEAKDB <- read_sf(here("SEAKDB","USFS_Southeast_Alaska_Drainage_Basin__SEAKDB__Watersheds.shp"))
+# read in alkalinity data
+alk <-  read_csv(here("USGS_Data","USGS_ALL_DIC_FOR_PHREEQC_mbEdits.csv")) %>%
+  mutate(site_no = as.character(site_no))
+# read in metadata for sites
+metadata <- read_csv(here("dic_info_data_summary.csv"))
+# merge metadata with chem data
+metadata %>%
+  select(STAID, LATITUDE, LONGITUDE, DRAIN_KM2) %>%
+  mutate(STAID = as.character(STAID)) %>%
+  distinct(STAID, .keep_all = TRUE) %>%
+  right_join(alk, by=c("STAID" = "site_no")) -> metaSites
+
+# filter just Southeast sites and get a tally of individual sites, filter distinct sites
+metaSites %>% 
+  filter(LATITUDE > 54 & LATITUDE < 63) %>%
+  filter(LONGITUDE > -138 & LONGITUDE < -130) %>% 
+  mutate(Date = as.Date(DATE, format = "%m/%d/%Y")) %>%
+  mutate(Year = lubridate::year(Date)) %>%
+  group_by(STAID, Year) %>%
+  tally() %>%
+  distinct(STAID, .keep_all = TRUE) -> consSites
+
+drainageChars <- readxl::read_xlsx(here("SEAKDB", "TABLE_A_Watershed_variables_for_SEAKDB_DOC_flux_estimates.xlsx"), sheet = "Watershed_variables")[,1:6]
+
+drainageRunoff <- readxl::read_xlsx(here("SEAKDB", "SEAKDB_watersheds_runoff_DOC.xlsx"), sheet = "Runoff_and_DOC")[,1:27]
+
+```
+
+## SEAKDB
+
+I received the watershed data from Frances, so we have the following variables for each watershed:
+* monthly runoff
+* % glacial
+* % flat area
+* area
+
+I was curious to see how much variation there is here in these variables, and how the rivers that we have chemistry data for compare to the broad range of rivers.
+
+# Hierachical clustering
+
+At first I tried grouping things by the variables present such as runoff for each month and watershed characterstics, but the groups were not well defined and the "Big3" rivers were quite different than the others. So I decided to scale the discharge values such that instead of discharge we'd look at the %monthly runoff contribution to the total annual runoff. So the % runoff in January = the Jan runoff / total runoff.
+
+I threw in all these new variables into a naive HCPC (heirarchical clustering based on principal components). 
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+cols <- drainageRunoff %>%
+  select(ends_with("m3")) %>%
+  names(.)
+
+drainageRunoff %>%
+  group_by(WS_ID) %>%
+  select(ends_with("m3")) %>%
+  nest(cols) %>%
+  mutate(TotalDischarge = map_dbl(data, sum)) %>% 
+  unnest() %>%
+  mutate_at(vars(cols), funs(. / TotalDischarge)) %>%
+  right_join(drainageChars, by="WS_ID") %>%
+  select(-Latitude_NAD83, -Longitude_NAD83) %>%
+  ungroup() -> toPCA
+
+toPCA %>%
+  arrange(desc(Area_m2)) %>%
+  #filter(Area_m2 < 16808425533) %>%
+  filter(complete.cases(.)) -> toPCA
+
+rownames(toPCA) <- toPCA$WS_ID
+
+toPCA %>%
+  select(-WS_ID) -> toPCA
+
+res.PCA <- PCA(toPCA, ncp=3, graph=TRUE)
+res.hcpc <- HCPC(res.PCA, graph = FALSE)
+
+```
+This gives us a good separation of watersheds based on the characteristics (i.e. percent glacial) and the runoff patterns (which months have the most runoff). Without providing groups a-priori, the clustering algorithm suggests three groups.
+
+```{r, echo=FALSE, warning=FALSE, echo=FALSE}
+fviz_cluster(res.hcpc, geom = "point", main = "Factor map")
+```
+
+We can do a sanity check to look at the classificaiton of each group on the map to see if it links up to our pre-conceived notions.
+
+```{r, echo=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+res.hcpc$data.clust 
+```
+
+```{r, echo=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+
+
+
+```
+percent watershed > 40?
+
+http://ckan.snap.uaf.edu/dataset/a-continuous-transboundary-50-meter-dem-for-the-alaska-perhumid-coastal-temperate-rainforest-ak
+

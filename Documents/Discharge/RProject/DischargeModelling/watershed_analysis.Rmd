@@ -1,0 +1,759 @@
+---
+title: "Watershed Analysis"
+author: "John Harley"
+date: "12/21/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+require(tidyverse)
+require(here)
+require(seacarb)
+require(dataRetrieval)
+require(ggmap)
+require(sf)
+require(leaflet)  
+require(kable)
+require(kableExtra)
+require(leaflet)  
+
+# seakDB polygons
+SEAKDB <- read_sf(here("SEAKDB","USFS_Southeast_Alaska_Drainage_Basin__SEAKDB__Watersheds.shp"))
+# read in alkalinity data
+alk <-  read_csv(here("USGS_Data","USGS_ALL_DIC_FOR_PHREEQC_mbEdits.csv")) %>%
+  mutate(site_no = as.character(site_no))
+# read in metadata for sites
+metadata <- read_csv(here("dic_info_data_summary.csv"))
+# merge metadata with chem data
+metadata %>%
+  select(STAID, LATITUDE, LONGITUDE, DRAIN_KM2) %>%
+  mutate(STAID = as.character(STAID)) %>%
+  distinct(STAID, .keep_all = TRUE) %>%
+  right_join(alk, by=c("STAID" = "site_no")) -> metaSites
+
+# filter just Southeast sites and get a tally of individual sites, filter distinct sites
+metaSites %>% 
+  filter(LATITUDE > 54 & LATITUDE < 63) %>%
+  filter(LONGITUDE > -138 & LONGITUDE < -130) %>% 
+  mutate(Date = as.Date(DATE, format = "%m/%d/%Y")) %>%
+  mutate(Year = lubridate::year(Date)) %>%
+  group_by(STAID) %>%
+  tally() %>%
+  filter(n > 12) %>%
+  distinct(STAID, .keep_all = TRUE) -> consSites
+
+```
+
+## USGS Chemistry sites 
+
+From metadata provided by Dave I got associated lat/lons for each sites with alkalinity, temperature and pH. By merging the metadata with the chemistry I wanted to get a sense of the watersheds and the number of samples for each site. We can get all other associated metadata from these sites by using the USGS `dataRetrieval` package.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+readNWISsite(siteNumbers = consSites$STAID) %>%
+  select(station_nm, drain_area_va, latitude=dec_lat_va, longitude=dec_long_va) %>%
+  bind_cols(consSites) -> consistent_sites
+```
+
+This gives us a data set which includes drainage area in square miles, which I think will prove to be valuable. 
+```{r, echo=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+my_map <- get_stamenmap(bbox=c(-137,54,-130.0,60), zoom=7, maptype = "watercolor")
+
+ggmap(my_map) +
+  geom_point(aes(x=longitude, y=latitude, size=drain_area_va), data=consistent_sites) +
+  ggtitle("All chemistry sites from Stackpoole", subtitle = "mostly USGS") +
+  scale_size_continuous(name= "Drainage area \n in sq. mi.")
+```
+One of the questions I had, at least initially was is the chemistry data from Stapoole representative of the SEAKDB watershed as a whole. For instance, if we have chemistry samples from Montana Creek those are not representative of the entire SEAKDB watershed since that watershed also includes the Mendenhall which is a much larger river.
+
+Of the 190 sites that Stackpoole had data from, 141 had a listed drainage area. Of the sites that did not have a listed drainage area, most were sites that were not sampled frequently. 
+```{r, echo=FALSE, warning=FALSE, echo=FALSE}
+consistent_sites  %>%
+  filter(is.na(drain_area_va)) %>%
+  arrange(desc(n)) %>%
+  head() %>%
+  kbl()  %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+We can certainly calculate the drainage areas of the watersheds above those sample points, but for the moment let's just focus on the data that USGS has calculated the drainage area for.
+
+As before, we matched the USGS data to the SEAKDB polygons. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+sites_sf <- st_as_sf(consistent_sites, coords = c("longitude", "latitude"), crs = st_crs(SEAKDB), agr = "constant")
+
+find_closest_polygon <- function() {
+  if(file.exists("closest.csv")) {
+    closest <- read.csv("closest.csv") %>%
+      select(OBJECTID = x)
+    message("closest sites already determined") } else {
+  closest <- list()
+  pb = txtProgressBar(min = 0, max = nrow(sites_sf), initial = 0) 
+    for(i in seq_len(nrow(sites_sf))){
+      closest[[i]] <- SEAKDB[which.min(
+      st_distance(SEAKDB, sites_sf[i,])),]
+      setTxtProgressBar(pb,i)
+      }
+    }
+  bind_rows(closest) %>%
+    pull(OBJECTID) %>%
+    write.csv("closest.csv")
+  
+  return(closest)
+}
+
+closest <- find_closest_polygon()
+
+bind_rows(closest) %>%
+  pull(OBJECTID) -> highlighSheds
+
+SEAKDB %>%
+  mutate(highlight = ifelse(OBJECTID %in% highlighSheds, "data", "nodata")) -> SEAKDB
+
+factpal <- colorFactor(topo.colors(2), SEAKDB$highlight)
+
+SEAKDB %>%
+  filter(highlight == "data") %>%
+  leaflet() %>%
+  addMarkers(lat = ~latitude, lng = ~longitude, data = consistent_sites, popup = ~station_nm) %>%
+  addPolygons(fillColor = ~"#d694ff", fillOpacity = 0.8, smoothFactor = 0.5, color="black") %>%
+  addProviderTiles("CartoDB.Positron")
+```
+
+We can quickly compare the size of the SEADB watersheds to the size of drainage area described by USGS. The USGS values were in square miles so we'll convert to hectares. The plot below shows the percent coverage of the water sample compared to the SEAKDB polygon (y axis) compared to the size of the drainge (log scale). I plotted a binomial smooth just for fun.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+consistent_sites %>%
+  mutate(OBJECTID = highlighSheds) -> sites
+
+SEAKDB %>%
+  filter(highlight == "data") %>%
+  left_join(sites) %>%
+  as_tibble() %>%
+  mutate(drainAreaHa = drain_area_va * 258.99) -> areaCompare
+
+areaCompare %>%
+  mutate(percentCovered = (drainAreaHa / Hectares)) %>%
+  filter(percentCovered < 1) %>% 
+  ggplot(aes(y=percentCovered, x=drain_area_va)) +
+  scale_x_log10(breaks = c(0, 1, 10, 100, 1000, 10000)) +
+  geom_point() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x="Drainage area (square miles)", y="Percent coverage (USGS / SEAKDB)") +
+  theme_bw() +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), se = TRUE) 
+
+```
+
+In general the larger rivers are better matches between the drainage area of the sample and the area of the polygon. For instance samples taken for the Stikine and Taku almost perfectly match their respective SEAKDB polygons. Smaller creeks however often don't have a drainage area the size of a polygon, which makes sense since there was a minimum polygon size for defining the watersheds. Here's an example below.
+
+# Downtown Juneau
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+SEAKDB %>%
+  filter(OBJECTID == "797") %>%
+  leaflet()  %>%
+  addPolygons(fillColor = ~"#d694ff", fillOpacity = 0.4, smoothFactor = 0.5, color="black") %>%
+  addProviderTiles("OpenTopoMap")
+```
+There are a number of creeks that have chemistry data that are represented by a single polygon in Juneau. Most of these data look pretty similar? so maybe this won't be a problem?
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+areaCompare %>%
+  filter(OBJECTID == "575") %>%
+  right_join(alk, by=c("STAID" = "site_no")) %>%
+  filter(!is.na(station_nm)) %>%
+  filter(mean_daily_alk_mgl_asCaCO3 < 500) %>%
+  ggplot(aes(x=mean_daily_alk_mgl_asCaCO3, y=mean_daily_pH, color=station_nm)) +
+  geom_point() +
+  theme_classic() +
+  labs(x="Alkalinity", y="pH", color="Station name") 
+```
+
+## loadflex
+
+I talked with Croix and he recommended using loadflex which is a better version of Rloadest. recall we generated DIC values from our stream chemistry data using S=0 and the `seacarb` package:
+
+```{r, include=FALSE}
+library(loadflex)
+metadata %>%
+  select(STAID, LATITUDE, LONGITUDE, DRAIN_KM2) %>%
+  mutate(STAID = as.character(STAID)) %>%
+  distinct(STAID, .keep_all = TRUE) %>%
+  right_join(alk, by=c("STAID" = "site_no")) %>%
+  filter(LATITUDE > 54 & LATITUDE < 63) %>%
+  filter(LONGITUDE > -138 & LONGITUDE < -130) %>%
+  mutate(alkMol = mean_daily_alk_mgl_asCaCO3 *  (1/1000) * (1/100.09)*2) -> southeast_chemistry
+
+s0 <- carb(flag = 8, var1 = southeast_chemistry$mean_daily_pH, var2 = southeast_chemistry$alkMol, S=0, T  = southeast_chemistry$mean_daily_tempC, k1k2 = "w14") %>%
+  mutate(S = "0")
+
+ggplot(s0, aes(x=DIC)) +
+  geom_density() +
+  scale_x_log10() +
+  theme_bw() +
+  labs(title="Most DIC values between 10-1000 mol/kg")
+```
+
+# Discharge Data
+I'm going to try this first with Station 15049900, which is Gold Creek. There was a flurry of sampling at this creek in the 1970s and we have 186 samples from that Creek. For flux estimates we need discharge data which can be extracted from the USGS `dataRetrieval` package. I wrote a function to do this for another project and it seems to work well here. I pulled in all available discharge data for the DIC measurements we have from USGS. Not all data was available, so to get a sense for what streams had data I grouped Stations into two classes, those with < 10 samples ("infrequent") and those with > 10 samples ("Frequent samples"). Here I show the numnber of missing discharge values for each class.
+
+```{r, include=FALSE}
+
+southeast_chemistry %>%
+  bind_cols(s0) %>%
+  mutate(Date = as.Date(DATE, format="%m/%d/%Y")) %>%
+  mutate(stream_site_no = STAID) -> toDischarge
+
+get_stream_data <- function(data, output=TRUE) {
+
+  
+  # defining which variables we want
+  pCode <- "00060" # this corresponds to daily discharge
+  start.date <- as.character(min(toDischarge$Date)) # this is a super fast API, we can extract as much data as we want
+  end.date <- as.character(max(toDischarge$Date)) # make sure it's up to date
+
+  data %>%
+    ungroup() %>%
+    select(stream_site_no) %>%
+    na.omit() %>%
+    unique() %>%
+    filter(nchar(as.character(stream_site_no)) > 7) %>%
+    .[[1]] %>%
+    as.character() %>%
+    as.list() -> USsiteNos
+
+  
+  # importing the data #
+  dataRetrieval::readNWISdv(siteNumbers = unlist(USsiteNos),
+                      parameterCd = pCode,
+                      startDate = start.date,
+                      endDate = end.date) %>%
+  left_join(dataRetrieval::readNWISsite(USsiteNos), by="site_no") %>%
+  select(site_no, Date, discharge=X_00060_00003, station_nm, 
+         stream_name=station_nm) -> streams
+  # removing erroneous values #
+  streams$discharge[streams$discharge < 0] <- NA
+  
+  streams$Date <- as.Date(streams$Date)
+  if(missing(output)) { 
+    NULL 
+    } else {
+  if(output=="TRUE") {
+    stream_data <<- streams
+  } else {
+    NULL
+  }
+    }
+  data %>%
+    mutate(Date=as.Date(Date)) %>%
+  left_join(streams, by=c("stream_site_no"="site_no", "Date")) %>%
+  return()
+
+}
+
+discharge <- get_stream_data(toDischarge, output=TRUE) 
+
+# get plot of where NAs are in the discharge data
+discharge %>%
+  group_by(STAID) %>%
+  add_tally() %>%
+  mutate(Frequency = ifelse(n > 10, "Frequent sampling", "Infrequent sampling")) %>%
+  mutate(DischargePresent = !is.na(discharge)) %>%
+  ggplot(aes(x=Frequency, fill=DischargePresent)) +
+  geom_bar() +
+  theme_classic() +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(title="Most missing discharge values come from rarely sampled streams")
+```
+
+I started playing with some flux models from `loadflex`, here is an example of flux calculated by linear interpolation for gold creek. For some reason the prediction intervals are not working, or rather they only give a single value for the entire date range...
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# prepare data for loadflex
+
+get_predictions <- function(STAID){
+
+discharge %>%
+  filter(STAID == STAID) %>% 
+  select(Date, discharge, DIC) %>%
+  group_by(Date) %>%
+  summarise_all(list(mean)) %>%
+  filter(complete.cases(.)) -> intdat
+
+  # get discharge data for estimating flux 
+estDat <- readNWISdv(siteNumbers = STAID, parameterCd = "00060") %>%
+  select(Date, discharge = X_00060_00003)
+
+meta <- metadata(constituent="DIC", flow="discharge", 
+  dates="Date", conc.units="mg L^-1", flow.units="cfs", load.units="kg", 
+  load.rate.units="kg d^-1", site.name=STAID,
+  consti.name="DIC", site.id=STAID, lat=58.3069	, lon=-134.3884)
+
+DIC_reg2 <- loadReg2(loadReg(DIC ~ model(8), data=intdat,
+                             flow="discharge", dates="Date", time.step="day", 
+                             flow.units="cfs", conc.units="mg/L", load.units="kg"))
+
+DIC_comp <- loadComp(reg.model=DIC_reg2, interp.format="conc", 
+                     interp.data=intdat, store='uncertainty')
+estDat <- estDat %>%
+  filter(!is.na(discharge))
+
+preds_load <- predictSolute(DIC_comp, "flux", estDat, se.pred=TRUE) %>%
+  bind_cols(estDat)
+
+return(preds_load)
+}
+
+USGS_sites <- discharge %>%
+  group_by(STAID) %>%
+  tally() %>%
+  filter(n > 20) %>%
+  filter(STAID != "15052900") %>%
+  pull(STAID)
+
+discharge %>%
+  group_by(STAID) %>%
+  add_tally() %>%
+  filter(n > 20) %>%
+  filter(STAID != "15052900") -> toBind
+
+USGS_flux <- map_df(USGS_sites, get_predictions)
+
+discharge %>%
+  filter(STAID %in% USGS_sites) %>%
+  ggplot(aes(x=STAID, y=DIC * 1000 * 12.011)) +
+  geom_boxplot()
+```
+
+And here is a measure of how the linear interpolation stacks up against the linear model fit.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+preds_lm %>%
+  select(flux_li = fit, date=date) %>%
+  left_join(preds_load, by="date") %>%
+  select(-STAID) %>%
+  pivot_longer(names_to = "model", -date) %>%
+  filter(model != "se.pred") %>%
+  ggplot(aes(x=date, y=value, color=model)) +
+  geom_line() +
+  theme_bw() +
+  geom_abline(linetype="dashed") +
+  scale_y_continuous(label=scales::comma) +
+  labs(title="Comparing linear interpolation to loadflex model", subtitle="Stikine River")
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+preds_li %>%
+  mutate(month = lubridate::month(date)) %>%
+  group_by(month) %>%
+  summarise(meanFlux = mean(flux, na.rm=TRUE), seFlux = sd(flux, na.rm = TRUE)/sqrt(length(flux))) %>%
+  ggplot(aes(x=month, y=meanFlux)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(x=month, ymin = meanFlux - seFlux, ymax=meanFlux + seFlux), width=0.5) +
+  theme_bw() +
+  labs(y="Flux (units are not correct)", x="Month", title="Monthly flux estimates for Stikine") +
+  scale_x_continuous(breaks=1:12, labels=month.abb) 
+```
+
+What are the rivers that have > 90% coverage and lots of data?
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+areaCompare %>%
+  mutate(percentCovered = (drainAreaHa / Hectares)) %>%
+  filter(percentCovered > 0.75)  %>%
+  distinct(STAID, .keep_all = TRUE) %>%
+  filter(STAID %in% consSites$STAID) %>%
+  pull(STAID) -> toPredict
+
+allPredictions <- toPredict %>%
+  map_df(get_predictions)
+
+consistent_sites %>%
+  select(STAID, station_nm) %>%
+  right_join(allPredictions, by="STAID") %>%
+  mutate(month = lubridate::month(date)) %>%
+  group_by(station_nm, month) %>%
+  add_tally() %>%
+  group_by(station_nm, month, n) %>%
+  summarise(flux = mean(flux, na.rm=TRUE), se.pred = median(se.pred)) %>%
+  ggplot(aes(x=month, y=flux)) +
+  geom_point() +
+  geom_line() +
+  labs(y="flux estimate") +
+  geom_errorbar(aes(ymin = flux - se.pred, ymax=flux + se.pred)) +
+  facet_wrap(~station_nm, scales="free_y") +
+  ggsave("flux.png", height=6, width=10, dpi=300)
+
+stream_data %>%
+  mutate(month = lubridate::month(Date)) %>%
+  group_by(stream_name, site_no, month) %>%
+  summarise(meanDischarge = mean(discharge, na.rm = TRUE), se = sd(discharge, na.rm = TRUE)) %>%
+  filter(site_no %in% toPredict) -> discharge_summary
+
+discharge_summary %>%
+  ggplot(aes(x=month, y=meanDischarge)) +
+  geom_point(color="red") +
+  geom_errorbar(aes(ymin = meanDischarge - se, ymax=meanDischarge + se)) +
+  geom_line(color="red") +
+  facet_wrap(~stream_name, scales="free_y") +
+  labs(y="Discharge") +
+  ggsave("dischage_models.png", height=6, width=10, dpi=300)
+
+consistent_sites %>%
+  select(STAID, station_nm) %>%
+  right_join(allPredictions, by="STAID") %>%
+  mutate(month = lubridate::month(date)) %>%
+  group_by(STAID, month) %>%
+  add_tally() %>%
+  group_by(STAID, month, n) %>%
+  summarise(flux = mean(flux, na.rm=TRUE), se.pred = median(se.pred)) %>%
+  left_join(discharge_summary, by=c("month" = "month", "STAID" = "site_no")) %>%
+  ggplot(aes(x=meanDischarge, y=flux)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+```
+
+
+## UAS/FS Data
+
+# Discharge Data
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# 2020 data
+to_read <- list.files(here("SixRivers"), pattern = ".csv")
+
+to_read %>%
+  map_df(~read.csv(here("SixRivers", .), skip=2) %>%
+  mutate(file = basename(.x))) %>%
+  mutate(Stream = gsub("([A-Za-z]+).*", "\\1", file)) %>%
+  mutate(Date = as.Date(Date.Time, format = "%m/%d/%Y")) %>%
+  mutate(Discharge = case_when(Stream == "Cowee" ~ Value * 35.31, 
+                               TRUE ~ Value)) -> discharge_data
+
+# also mendenhall 
+
+mendy <- dataRetrieval::readNWISdv(siteNumbers = "15052500", parameterCd = "00060") %>%
+  mutate(Stream = "Mendenhall", Discharge = X_00060_00003, Comment = X_00060_00003_cd)
+
+discharge_data %>%
+  ggplot(aes(x=Date, y=Discharge, color=Stream)) +
+  geom_point() +
+  facet_wrap(~Stream, scales="free_y")
+
+# 2015-2019 data
+
+old_data <- readxl::read_xlsx(here("SixRivers", "Discharge_summary_Dec2019.xlsx"), col_types = c("date", "numeric", "text", "text"))%>%
+  mutate(Discharge = Discharge * 35.31, Stream = River)   # convert cumecs to cfs 
+ 
+discharge_data %>%
+  select(Date, Stream, Discharge, Comment = Grade) %>%
+  bind_rows(old_data) %>%  # add in old data
+  bind_rows(mendy) -> all_UAS_discharge # add in mendenhall data
+
+all_UAS_discharge %>% 
+  ggplot(aes(x=Date, y=Discharge, color=Stream)) +
+  geom_point() +
+  facet_wrap(~Stream, scales="free")
+```
+
+# Chemistry data
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# 
+
+numeric_cols <- c("DOC", "Alkalinity", "pCO2", "Silica", "Temp", "pH")
+stream_Data1 <- readxl::read_xlsx(here("SixRivers", "Streams_data_2015_2016_EW.xlsx")) %>%
+  select(Date, Stream, DOC, Alkalinity = ALK, pCO2, Silica = SILICA, Temp = TEMP, pH, Notes) %>%
+  mutate(Date = as.Date(Date)) 
+
+stream_Data1[numeric_cols] <- sapply(stream_Data1[numeric_cols], as.numeric)
+
+stream_Data2 <- readxl::read_xlsx(here("SixRivers", "Streams_data_2017-2020_2-2-21.xlsx"))[-1, ] %>%
+  select(Date, Stream, DOC, Alkalinity, pCO2 = CO2, Silica, Temp, pH, Notes) %>% 
+  mutate(Date = as.numeric(Date)) %>%
+  mutate(Date = as.Date(Date, origin = as.Date("1899-12-30", format = "%Y-%m-%d")))
+
+stream_Data2[numeric_cols] <- sapply(stream_Data2[numeric_cols], as.numeric)
+
+all_chem <- bind_rows(stream_Data1, stream_Data2) 
+
+all_chem %>%
+  filter(Stream == "Sheep")
+
+give.n <- function(x){
+  return(c(y = median(x)*1.35, label = length(x))) 
+  # experiment with the multiplier to find the perfect position
+}
+
+
+all_chem %>%
+  filter(Stream %in% c("Cowee", "Herbert", "Peterson", "Montana", "Mendenhall","Fish", "Sheep")) -> sixRivers
+  
+sixRivers %>%
+  ggplot(aes(x=Stream, y = Alkalinity)) +
+  geom_boxplot() +
+   stat_summary(fun.data = give.n, geom = "text", fun.y = median,
+                  position = position_dodge(width = 0.75)) 
+ 
+```
+
+# check carbonate system
+
+With our six rivers we want to first merge with the discharge data since chemistry values without discharge aren't useful to us at the moment. We'll merge the two datasets and then calculate the components of the carbonate system.
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+sixRivers %>%
+  left_join(all_UAS_discharge, by=c("Date", "Stream" = "River")) %>%
+  select(Date, Stream, Alkalinity, Temp, pH) %>%
+  filter(complete.cases(.)) %>%
+  group_by(Stream) %>%
+  tally(name = "Complete Cases") %>%
+  head() %>%
+  kable(caption = "Total carbnate chemistry") 
+```  
+
+This leaves us with about 90-100 (except a lot more for Mendenhall) complete observations per stream. We can plug those data into `seacarb` to get the DIC values from the other chemistry components.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+sixRivers %>%
+  left_join(all_UAS_discharge, by=c("Date", "Stream" = "River")) %>%
+  select(Date, Stream, Alkalinity, Temp, pH, pCO2_measured = pCO2, Discharge) %>%
+  filter(complete.cases(.)) %>%
+  #left_join(sites, by="site_no") %>%
+  #filter(dec_lat_va  > 0) %>% # TA = TA.*(1/1000)*(1/100.09)*2; % Conversion to mol/kg; factor of 2 related to carbonate -2 charge
+  mutate(alkMol = Alkalinity *  (1/1000) * (1/100.09)*2) -> sixRiverschemistry
+
+sixRiversCarb <- carb(flag = 8, var1 = sixRiverschemistry$pH, var2 = sixRiverschemistry$alkMol, S=0, T = sixRiverschemistry$Temp, k1k2 = "w14") %>%
+  mutate(S = "0")
+
+sixRiverschemistry %>%
+  select(Stream, pCO2_measured, Date) %>%
+  bind_cols(sixRiversCarb) -> allChemDic
+
+allChemDic %>%  
+  ggplot(aes(x=Stream, y=DIC * 1000 * 12.011)) +
+  geom_boxplot() +
+  labs(y = "DIC in umol/kg (units are correct)", title = "DIC for Alaska Streams") +
+  geom_hline(yintercept = c(1.7, 16.6), linetype="dashed", color="red") +
+  geom_hline(yintercept = 5.3, color="red") +
+  annotate(geom= "text", x=4, y=15, label = "range from Stackpoole 2017", color="red")
+
+```
+We can look at DIC patterns over time by examining concentrations for each stream.  
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+sixRiverschemistry %>%
+  select(Stream, pCO2_measured) %>%
+  bind_cols(sixRiversCarb) %>%
+  mutate(xCO2 = p2xCO2(S=0, T = 0, pCO2 = sixRiversCarb$pCO2, Patm = 1)) %>%
+  ggplot(aes(x=pCO2_measured, y=xCO2, color=pH)) +
+  geom_point(alpha=1) +
+  scale_color_viridis_c() +
+  labs(y = "pCO2 calculated from seacarb",x = "pCO2 measured from samples", title = "Comparing pCO2 values (ppmv)") +
+  geom_abline() +
+  theme_bw() +
+  ggsave("pCO2.png")
+
+allChemDic %>%
+  mutate(DICmg = DIC * 1000 * 12.01) %>% 
+  ggplot(aes(x=Date, y=DICmg, color=Stream)) +
+  geom_line() +
+  facet_wrap(~Stream) +
+  labs(y="DIC Concentration (mg/L)") 
+
+```
+
+And by month to get an idea of the seasonal cycle.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+allChemDic %>%
+  mutate(month = lubridate::month(Date)) %>%
+  mutate(DICmg = DIC * 1000 * 12.01) %>% 
+  group_by(Stream, month) %>%
+  summarise_if(is.numeric, list(median)) %>%
+  ggplot(aes(x=month, y=DICmg, color=Stream)) +
+  geom_line() +
+  facet_wrap(~Stream, ncol=2) +
+  scale_x_continuous(breaks = 1:12, labels=month.abb) +
+  labs(y="DIC Concentration (mg/L)") 
+
+```
+# Loadflex model with Six Rivers Data
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+require(loadflex)
+require(rloadest)
+
+get_uas_predictions <- function(Stream){
+  
+  stream_sym <- rlang::sym("Montana")
+  
+  allChemDic %>%
+    mutate(month = lubridate::month(Date)) %>%
+    filter(Stream == stream_sym) %>%
+    left_join(all_UAS_discharge, by=c("Stream" = "River", "Date" = "Date")) %>%
+    filter(Stream == stream_sym) %>%
+    mutate(DICmg = DIC * 1000 * 12.01) %>% # convert to mg
+    select(Date, DICmg, Stream, Discharge) %>% 
+    filter(Discharge > 0) %>%
+    filter(complete.cases(.)) -> intdat
+
+  
+# get discharge data for estimating flux 
+  all_UAS_discharge %>%
+    filter(Stream == Stream) -> estDat
+
+  
+  meta <- metadata(constituent="DIC", flow="discharge", 
+    dates="Date", conc.units="mg L^-1", flow.units="cfs", load.units="kg", 
+    load.rate.units="kg d^-1", site.name="",
+    consti.name="DIC", site.id="", lat=58.3069	, lon=-134.3884)
+
+  DIC_reg2 <- loadReg2(loadReg(DICmg ~ model(7), data=intdat,
+                             flow="Discharge", dates="Date", time.step="day", 
+                             flow.units="cfs", conc.units="mg/L", load.units="kg"))
+
+  DIC_comp <- loadComp(reg.model=DIC_reg2, interp.format="conc", 
+                     interp.data=intdat, store='uncertainty')
+  estDat <- estDat %>%
+    filter(Discharge > 0) %>%
+    filter(!is.na(Discharge))
+
+  preds_load <- predictSolute(DIC_comp, "flux", estDat, se.pred=TRUE) %>%
+    bind_cols(estDat) 
+  return(preds_load)
+}
+
+allStreams <- unique(sixRiverschemistry$Stream)
+
+allPredictions <- map_df(allStreams, get_uas_predictions)
+
+allPredictions %>%
+  mutate(month = lubridate::month(Date)) %>%
+  group_by(Stream, month) %>% 
+  summarise(meanFlux = mean(flux), meanDischarge = mean(Discharge)) %>%
+  ggplot(aes(x=month, y=meanDischarge)) +
+    geom_line() +
+    facet_wrap(~Stream, scales="free_y")
+
+all_UAS_discharge %>%
+  filter(Stream == "Peterson") %>%
+  mutate(yday = lubridate::yday(Date), Year = lubridate::year(Date)) %>%
+  ggplot(aes(x=yday, y=Discharge, color=as.factor(Year))) +
+  geom_point()
+```
+# Joining UAS Chemistry with USGS Chemistry
+I'm also including NWIS Chemistry which Frances accessed on February 19, 2021. This includes data from 2019 and 2020 from major river systems in Southeast. I'm going to pull them in using `dataRetrieval`.
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+locations <- read.csv(here("SixRivers", "SixRiversSites.csv"))
+
+DIC_sites <- readxl::read_xlsx(here("USGS_Data", "all_seak_DIC_from.NWIS.xlsx"), sheet="nwis_site_meta") %>%
+  pull(site_no)
+
+dat <- dataRetrieval::readNWISdata(sites = DIC_sites, parameterCd = "00691", service= "measurements", startDate = as.Date("2018-01-01"))
+
+dat %>%
+   summary()
+sixRiverschemistry %>%
+  left_join(locations, by="Stream") -> sixRiverschemistry
+  
+southeast_chemistry %>%
+  mutate(DATE = as.Date(DATE, format="%m/%d/%Y")) %>%
+  select(Stream = STAID, LATITUDE, LONGITUDE, Date = DATE, alkMol, pH = mean_daily_pH, Temp = mean_daily_tempC) %>%
+  bind_rows(sixRiverschemistry) %>%
+  select(-Alkalinity, -pCO2_measured, -Discharge) -> all_chemistry
+
+all_chemistry_DIC <- carb(flag = 8, var1 = all_chemistry$pH, var2 = all_chemistry$alkMol, S=0, T = all_chemistry$Temp, k1k2 = "w14") %>%
+  mutate(S = "0")
+
+sites_sf <- all_chemistry %>%
+  distinct(Stream, LATITUDE, LONGITUDE) %>%
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = st_crs(SEAKDB), agr = "constant")
+
+closest <- list()
+for(i in seq_len(nrow(sites_sf))){
+  closest[[i]] <- SEAKDB[which.min(
+    st_distance(SEAKDB, sites_sf[i,])),]
+}  
+
+bind_rows(closest) %>%
+  select(OBJECTID) %>%
+  bind_cols(as.data.frame(sites_sf)) %>%
+  select(OBJECTID, Stream) %>%
+  right_join(all_chemistry, by="Stream") %>%
+  bind_cols(all_chemistry_DIC[c("DIC")]) -> all_chem_dic
+
+all_chem_dic %>%
+  group_by(Stream) %>%
+  add_tally() %>%
+  filter(n > 20) %>%
+  ggplot(aes(x=Stream, y=DIC * 1000 * 12.01)) +
+  geom_boxplot() +
+  geom_hline(yintercept = c(1.7, 16.6), linetype="dashed", color="red") +
+  geom_hline(yintercept = 5.3, color="red") +
+  annotate(geom= "text", x=4, y=15, label = "range from Stackpoole 2017", color="red") +
+    stat_summary(fun.data = give.n, geom = "text", fun.y = median,
+                  position = position_dodge(width = 0.75)) +
+  ggsave("DIC.png", height=6, width=10, dpi=300)
+
+
+
+all_chem_dic %>%
+  mutate(month = lubridate::month(Date)) %>% 
+  filter(Stream %in% c("Cowee", "Herbert", "Fish", "Peterson", "Mendenhall", "Montana")) %>%
+  filter(month > 4) %>%
+  mutate(month = as.factor(month)) %>% 
+  ggplot(aes(x=month, y=DIC*1000*12.01, fill=Stream)) +
+  geom_boxplot() +
+  scale_x_discrete(breaks = 1:12, labels=month.abb) +
+  labs(x="", y="DIC in mg/L") +
+  scale_fill_viridis_d() +
+    stat_summary(fun.data = give.n, geom = "text", fun.y = median,
+                  position = position_dodge(width = 0.75)) +
+  ggsave("a.png", height=6, width = 8, dpi=300)
+```
+
+# Calculating alkalinity from pH and measured pCO2
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+carb(flag = 1, var1 = sixRiverstemp$pH, var2 = sixRiverstemp$pCO2_measured, T = sixRiverstemp$Temp) %>%
+  bind_cols(sixRiverschemistry) %>%
+  ggplot(aes(x=alkMol, y=ALK/(1000000 * 12)))+
+  geom_point() +
+  scale_y_log10() +
+  scale_x_log10() +
+  geom_abline() +
+  labs(x="Alkalinity (measured)", y="Alkalinity (calculated)")
+
+```
+
+# Lithology from Frances
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+all_chem_dic %>%
+  left_join(litho_summary, by=c("OBJECTID" = "WS_ID")) %>%
+  select(OBJECTID, DIC, AX, CG, CPC, ST, WR, YT) %>%
+  pivot_longer(-c(DIC, OBJECTID)) %>%
+  group_by(OBJECTID) %>%
+  slice(which.max(value)) %>%
+  select(OBJECTID, name) -> major_group
+  
+all_chem_dic %>%
+  left_join(major_group, by=c("OBJECTID")) %>%
+  ggplot(aes(x=name, y=DIC)) +
+  geom_violin() +
+  labs(y="DIC", x="Major constituent") +
+   stat_summary(fun.data = give.n, geom = "text", fun.y = median,
+                  position = position_dodge(width = 0.75)) 
+ 
+```
