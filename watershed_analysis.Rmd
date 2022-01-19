@@ -6,6 +6,15 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+#remotes::install_github("USGS-R/smwrData")
+#remotes::install_github("USGS-R/smwrBase")
+#remotes::install_github("USGS-R/smwrGraphs")
+#remotes::install_github("USGS-R/smwrStats")
+#remotes::install_github("USGS-R/smwrQW")
+#remotes::install_github("USGS-R/rloadest")
+#remotes::install_github("appling/unitted")
+#remotes::install_github("USGS-R/loadflex")
+
 require(tidyverse)
 require(here)
 require(seacarb)
@@ -15,10 +24,11 @@ require(sf)
 require(leaflet)  
 require(kable)
 require(kableExtra)
-require(leaflet)  
 
 # seakDB polygons
-SEAKDB <- read_sf(here("SEAKDB","USFS_Southeast_Alaska_Drainage_Basin__SEAKDB__Watersheds.shp"))
+SEAKDB <- read_sf(here("SEAKDB","SEAKDB.shp"))
+SEAKDB <- st_transform(SEAKDB, crs = "EPSG:4326")
+
 # read in alkalinity data
 alk <-  read_csv(here("USGS_Data","USGS_ALL_DIC_FOR_PHREEQC_mbEdits.csv")) %>%
   mutate(site_no = as.character(site_no))
@@ -39,8 +49,9 @@ metaSites %>%
   mutate(Year = lubridate::year(Date)) %>%
   group_by(STAID) %>%
   tally() %>%
-  filter(n > 12) %>%
-  distinct(STAID, .keep_all = TRUE) -> consSites
+  distinct(STAID, .keep_all = TRUE) %>%
+  mutate(nchar = nchar(STAID)) %>%
+  filter(nchar > 7) -> consSites
 
 ```
 
@@ -80,60 +91,42 @@ We can certainly calculate the drainage areas of the watersheds above those samp
 As before, we matched the USGS data to the SEAKDB polygons. 
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
-sites_sf <- st_as_sf(consistent_sites, coords = c("longitude", "latitude"), crs = st_crs(SEAKDB), agr = "constant")
-
-find_closest_polygon <- function() {
-  if(file.exists("closest.csv")) {
-    closest <- read.csv("closest.csv") %>%
-      select(OBJECTID = x)
-    message("closest sites already determined") } else {
+if(FALSE){
+find_closest_polygon <- function(shape, pts) {
   closest <- list()
-  pb = txtProgressBar(min = 0, max = nrow(sites_sf), initial = 0) 
-    for(i in seq_len(nrow(sites_sf))){
-      closest[[i]] <- SEAKDB[which.min(
-      st_distance(SEAKDB, sites_sf[i,])),]
+  pb = txtProgressBar(min = 0, max = nrow(pts), initial = 0) 
+    for(i in seq_len(nrow(pts))){
+      closest[[i]] <- shape[which.min(
+      st_distance(shape, pts[i,])),]
       setTxtProgressBar(pb,i)
       }
-    }
+    
   bind_rows(closest) %>%
-    pull(OBJECTID) %>%
-    write.csv("closest.csv")
+    bind_cols(pts) -> closest_df
   
-  return(closest)
+  return(closest_df)
 }
 
-closest <- find_closest_polygon()
+closest <- find_closest_polygon(shape = SEAKDB, pts = sites_sf)
 
-bind_rows(closest) %>%
-  pull(OBJECTID) -> highlighSheds
-
-SEAKDB %>%
-  mutate(highlight = ifelse(OBJECTID %in% highlighSheds, "data", "nodata")) -> SEAKDB
-
-factpal <- colorFactor(topo.colors(2), SEAKDB$highlight)
-
-SEAKDB %>%
-  filter(highlight == "data") %>%
-  leaflet() %>%
-  addMarkers(lat = ~latitude, lng = ~longitude, data = consistent_sites, popup = ~station_nm) %>%
-  addPolygons(fillColor = ~"#d694ff", fillOpacity = 0.8, smoothFactor = 0.5, color="black") %>%
-  addProviderTiles("CartoDB.Positron")
+closest %>%
+  dplyr::select(WS_ID, Stream) %>%
+  write.csv("closest.csv")
+}
 ```
 
-We can quickly compare the size of the SEADB watersheds to the size of drainage area described by USGS. The USGS values were in square miles so we'll convert to hectares. The plot below shows the percent coverage of the water sample compared to the SEAKDB polygon (y axis) compared to the size of the drainge (log scale). I plotted a binomial smooth just for fun.
+We can quickly compare the size of the SEADB watersheds to the size of drainage area described by USGS. The USGS values were in square miles so we'll convert to hectares. The plot below shows the percent coverage of the water sample compared to the SEAKDB polygon (y axis) compared to the size of the drainage (log scale). I plotted a binomial smooth just for fun.
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
-consistent_sites %>%
-  mutate(OBJECTID = highlighSheds) -> sites
 
 SEAKDB %>%
-  filter(highlight == "data") %>%
-  left_join(sites) %>%
+  left_join(SEAKDB_match, by = "WS_ID") %>%
+  left_join(consistent_sites, by = c("Stream" = "STAID")) %>%
   as_tibble() %>%
-  mutate(drainAreaHa = drain_area_va * 258.99) -> areaCompare
+  mutate(drainArea = drain_area_va * 2.59e+6) -> areaCompare
 
 areaCompare %>%
-  mutate(percentCovered = (drainAreaHa / Hectares)) %>%
+  mutate(percentCovered = drainArea / SHAPE_Area) %>%
   filter(percentCovered < 1) %>% 
   ggplot(aes(y=percentCovered, x=drain_area_va)) +
   scale_x_log10(breaks = c(0, 1, 10, 100, 1000, 10000)) +
@@ -150,7 +143,7 @@ In general the larger rivers are better matches between the drainage area of the
 # Downtown Juneau
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 SEAKDB %>%
-  filter(OBJECTID == "797") %>%
+  filter(WS_ID == "575") %>%
   leaflet()  %>%
   addPolygons(fillColor = ~"#d694ff", fillOpacity = 0.4, smoothFactor = 0.5, color="black") %>%
   addProviderTiles("OpenTopoMap")
@@ -159,7 +152,7 @@ There are a number of creeks that have chemistry data that are represented by a 
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 areaCompare %>%
-  filter(OBJECTID == "575") %>%
+  filter(WS_ID == "575") %>%
   right_join(alk, by=c("STAID" = "site_no")) %>%
   filter(!is.na(station_nm)) %>%
   filter(mean_daily_alk_mgl_asCaCO3 < 500) %>%
@@ -175,6 +168,7 @@ I talked with Croix and he recommended using loadflex which is a better version 
 
 ```{r, include=FALSE}
 library(loadflex)
+library(seacarb)
 metadata %>%
   select(STAID, LATITUDE, LONGITUDE, DRAIN_KM2) %>%
   mutate(STAID = as.character(STAID)) %>%
@@ -270,7 +264,7 @@ I started playing with some flux models from `loadflex`, here is an example of f
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE}
 # prepare data for loadflex
-
+if(FALSE){
 get_predictions <- function(STAID){
 
 discharge %>%
@@ -285,15 +279,15 @@ estDat <- readNWISdv(siteNumbers = STAID, parameterCd = "00060") %>%
   select(Date, discharge = X_00060_00003)
 
 meta <- metadata(constituent="DIC", flow="discharge", 
-  dates="Date", conc.units="mg L^-1", flow.units="cfs", load.units="kg", 
-  load.rate.units="kg d^-1", site.name=STAID,
+  dates="Date", conc.units="mg L^-1", flow.units="cfs", load.units="g", 
+  load.rate.units="g d^-1", site.name=STAID,
   consti.name="DIC", site.id=STAID, lat=58.3069	, lon=-134.3884)
 
 DIC_reg2 <- loadReg2(loadReg(DIC ~ model(8), data=intdat,
                              flow="discharge", dates="Date", time.step="day", 
-                             flow.units="cfs", conc.units="mg/L", load.units="kg"))
+                             flow.units="cfs", conc.units="mg/L", load.units="g"))
 
-DIC_comp <- loadComp(reg.model=DIC_reg2, interp.format="conc", 
+DIC_comp <- loadComp(reg.model=DIC_reg2, interp.format="flux", 
                      interp.data=intdat, store='uncertainty')
 estDat <- estDat %>%
   filter(!is.na(discharge))
@@ -303,7 +297,7 @@ preds_load <- predictSolute(DIC_comp, "flux", estDat, se.pred=TRUE) %>%
 
 return(preds_load)
 }
-
+}
 USGS_sites <- discharge %>%
   group_by(STAID) %>%
   tally() %>%
@@ -356,13 +350,199 @@ preds_li %>%
   theme_bw() +
   labs(y="Flux (units are not correct)", x="Month", title="Monthly flux estimates for Stikine") +
   scale_x_continuous(breaks=1:12, labels=month.abb) 
+
+all_cons <- all_chemistry_DIC %>%
+  dplyr::select(CO2, HCO3, CO3, DIC) %>%
+  bind_cols(all_chemistry)
+
+
+all_cons %>%
+  select(Stream, CO2, HCO3, CO3) %>%
+  group_by(Stream) %>%
+  summarise_all(list(mean)) %>%
+  pivot_longer(-Stream, names_to = "Constituent" , values_to = "Concentration") %>%
+  ggplot(aes(x=Stream, y= Concentration, fill = Constituent)) +
+  geom_bar(stat = "identity") +
+  labs(title = "DIC breakdown averaged by stream")
+
+all_cons %>%
+  select(Stream, CO2, HCO3, CO3, pH, DIC, Date) %>%
+  mutate(ratio = CO2/DIC) %>%
+  ggplot(aes(x=Date, y=ratio, color=pH)) +
+  geom_point() +
+  labs(y = "percent DIC that is CO2", title = "All stream DIC constituents") +
+  scale_y_continuous(labels = scales::percent) +
+  ggsave("DICall.png")
+
+all_cons %>%
+  filter(Stream == "15049900") %>%
+  select(Stream, CO2, HCO3, CO3, pH, DIC, Date) %>%
+  mutate(ratio = CO2/DIC) %>%
+  ggplot(aes(x=pH, y=ratio, color=pH)) +
+  geom_point() +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(y = "percent DIC that is CO2", title = "Gold Creek DIC constituents") +
+  ggsave("DICGold.png")
+
+
+all_cons %>%
+  filter(Stream %in% c("Peterson","Herbert","Cowee","Fish", "Mendenhall", "Montana")) %>%
+  select(Stream, CO2, HCO3, CO3, pH, DIC, Date) %>%
+  mutate(ratio = CO2/DIC) %>%
+  ggplot(aes(x=Stream, y=ratio, color=Stream)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(y = "percent DIC that is CO2", title = "Six Rivers DIC constituents") +
+  ggsave("DICPeterson.png")
+
+
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  mutate(ratio = HCO3/CO2, group = paste(karstFlag, clust)) %>%
+  filter(!is.na(karstFlag)) %>%
+  select(group, ratio) -> test_data
+
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  group_by(karstFlag, clust) %>%
+  select(CO2, HCO3, alkMol) %>%
+  pivot_longer(-c(karstFlag, clust), names_to = "variable", values_to = "value") %>%
+  group_by(karstFlag, clust, variable) %>%
+  summarise_all(list(mean = mean, sd = sd)) %>%
+  filter(!is.na(clust)) %>%
+  ggplot(aes(x = karstFlag, y = mean, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  facet_wrap(~clust) +
+  scale_fill_brewer(palette = "Set1") +
+  geom_errorbar(aes(ymin = mean, ymax = mean + sd), width = 0.2, position = position_dodge(0.9)) +
+  labs(y = "concentration in mol/kg") +
+  ggsave("alkco2.png")
+
+summary(all_cons$pH)
+```
+
+```{r}
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  mutate(ratio = HCO3/CO2, group = paste(karstFlag, clust)) %>%
+  filter(!is.na(karstFlag)) %>%
+  group_by(group, karstFlag, clust) %>%
+  summarise(mean = mean(ratio), se = plotrix::std.error(ratio)) %>%
+  ggplot(aes(x = clust, y = mean, fill = karstFlag)) +
+  geom_bar(stat = "identity", position = position_dodge(), alpha= 0.8) +
+  scale_fill_manual(values = c("#339F94", "#9F333E")) +
+  theme_bw() +
+  geom_errorbar(aes(ymax = mean + se, ymin = mean - se), width = 0.4,  position = position_dodge(width = 0.9)) +
+  labs(x = "Discharge regime", y = "HCO3/CO2 ratio", fill = "Karst group") +
+  ggsave("ratios.png")
+
+
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  mutate(ratio = HCO3/DIC, group = paste(karstFlag, clust)) %>%
+  filter(!is.na(karstFlag)) %>%
+  group_by(group, karstFlag, clust) %>%
+  summarise(mean = mean(ratio), se = plotrix::std.error(ratio)) -> percent_HCO3
+
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  mutate(ratio = HCO3/CO2, group = paste(karstFlag, clust)) %>%
+  mutate(month = lubridate::month(Date)) %>%
+  filter(!is.na(karstFlag) & ratio < 60) %>%
+  group_by(group, karstFlag, clust, month) %>%
+  summarise(mean = geoMean(ratio), se = plotrix::std.error(ratio)) %>%
+  ggplot(aes(x = month, y = mean, color = karstFlag)) +
+  facet_wrap(~clust, ncol = 1, scales = "free_y") +
+  geom_line() +
+  geom_point() +
+  geom_smooth(se=FALSE) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  labs(x = "month", y = "HCO3/CO2 ratio")  +
+  ggsave("month.png")
+
+
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  mutate(ratio = DIC/alkMol, group = paste(karstFlag, clust)) %>%
+  mutate(month = lubridate::month(Date)) %>%
+  filter(!is.na(karstFlag) & ratio < 60) %>%
+  group_by(karstFlag, clust) %>%
+  summarise(mean = mean(ratio), se = plotrix::std.error(ratio)) %>%
+  ggplot(aes(x = clust, y = mean, fill = karstFlag)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_brewer(palette = "Set2") +
+  geom_errorbar(aes(ymax = mean + se, ymin = mean - se), width = 0.4,  position = position_dodge(width = 0.9)) +
+  labs(y = "ALK/DIC", x = "Discharge group", title = "alkalintiy/dic ratios") +
+  ggsave("Alk.png")
+
+all_cons %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(karst_match, by = "WS_ID") %>%
+  left_join(clust, by = "WS_ID") %>%
+      mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  mutate(ratio = alkMol/DIC, group = paste(karstFlag, clust)) %>%
+  mutate(month = lubridate::month(Date)) %>%
+  filter(!is.na(karstFlag) & ratio < 60) %>%
+  group_by(group, karstFlag, clust, month) %>%
+  summarise(mean = mean(ratio), se = plotrix::std.error(ratio)) %>%
+  ggplot(aes(x = month, y = mean, color = karstFlag)) +
+  facet_wrap(~clust, ncol = 1) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_color_brewer(palette = "Set2") +
+  labs(x = "month", y = "ALK/DIC ratio")  +
+  ggsave("Alkmonth.png")
+
+TukeyHSD(aov(ratio ~ group, data = test_data))
+
 ```
 
 What are the rivers that have > 90% coverage and lots of data?
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
 areaCompare %>%
-  mutate(percentCovered = (drainAreaHa / Hectares)) %>%
+  mutate(percentCovered = drainArea / SHAPE_Area) %>%
   filter(percentCovered > 0.75)  %>%
   distinct(STAID, .keep_all = TRUE) %>%
   filter(STAID %in% consSites$STAID) %>%
@@ -456,7 +636,8 @@ discharge_data %>%
   bind_rows(old_data) %>%  # add in old data
   bind_rows(mendy) -> all_UAS_discharge # add in mendenhall data
 
-all_UAS_discharge %>% 
+all_UAS_discharge %>%
+  filter(Stream %in% c("Cowee", "Fish", "Montana", "Mendenhall", "Peterson", "Herbert")) %>%
   ggplot(aes(x=Date, y=Discharge, color=Stream)) +
   geom_point() +
   facet_wrap(~Stream, scales="free")
@@ -483,11 +664,8 @@ stream_Data2[numeric_cols] <- sapply(stream_Data2[numeric_cols], as.numeric)
 
 all_chem <- bind_rows(stream_Data1, stream_Data2) 
 
-all_chem %>%
-  filter(Stream == "Sheep")
-
 give.n <- function(x){
-  return(c(y = median(x)*1.35, label = length(x))) 
+  return(c(y = median(x)*1.35, label = length(x)))
   # experiment with the multiplier to find the perfect position
 }
 
@@ -536,20 +714,26 @@ sixRiverschemistry %>%
   select(Stream, pCO2_measured, Date) %>%
   bind_cols(sixRiversCarb) -> allChemDic
 
-allChemDic %>%  
+dic <- allChemDic %>%  
   ggplot(aes(x=Stream, y=DIC * 1000 * 12.011)) +
-  geom_boxplot() +
-  labs(y = "DIC in umol/kg (units are correct)", title = "DIC for Alaska Streams") +
-  geom_hline(yintercept = c(1.7, 16.6), linetype="dashed", color="red") +
-  geom_hline(yintercept = 5.3, color="red") +
-  annotate(geom= "text", x=4, y=15, label = "range from Stackpoole 2017", color="red")
+    geom_hline(yintercept = 5.3, color="red") +
+    geom_hline(yintercept = c(1.7, 16.6), linetype="dashed", color="red") +
+  geom_boxplot(fill = "grey80") +
+  labs(y = expression(paste("DIC in mg C L" ^-1)),  x = "Stream/River") +
+  annotate(geom= "text", x=4, y=17, label = "range from Stackpoole 2017", color="red") +
+  guides(fill = FALSE) +
+  theme_bw() +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_fill_brewer() 
+  
+ggsave(plot = dic,filename =  "Figure3.png", height = 4, width = 5, dpi=300)
 
 ```
 We can look at DIC patterns over time by examining concentrations for each stream.  
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
 
-sixRiverschemistry %>%
+pco2 <- sixRiverschemistry %>%
   select(Stream, pCO2_measured) %>%
   bind_cols(sixRiversCarb) %>%
   mutate(xCO2 = p2xCO2(S=0, T = 0, pCO2 = sixRiversCarb$pCO2, Patm = 1)) %>%
@@ -558,8 +742,9 @@ sixRiverschemistry %>%
   scale_color_viridis_c() +
   labs(y = "pCO2 calculated from seacarb",x = "pCO2 measured from samples", title = "Comparing pCO2 values (ppmv)") +
   geom_abline() +
-  theme_bw() +
-  ggsave("pCO2.png")
+  theme_bw() 
+  
+ggsave("pCO2.png", pco2)
 
 allChemDic %>%
   mutate(DICmg = DIC * 1000 * 12.01) %>% 
@@ -652,108 +837,1042 @@ all_UAS_discharge %>%
 # Joining UAS Chemistry with USGS Chemistry
 I'm also including NWIS Chemistry which Frances accessed on February 19, 2021. This includes data from 2019 and 2020 from major river systems in Southeast. I'm going to pull them in using `dataRetrieval`.
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+# UAS Sites
 locations <- read.csv(here("SixRivers", "SixRiversSites.csv"))
 
-DIC_sites <- readxl::read_xlsx(here("USGS_Data", "all_seak_DIC_from.NWIS.xlsx"), sheet="nwis_site_meta") %>%
-  pull(site_no)
-
-dat <- dataRetrieval::readNWISdata(sites = DIC_sites, parameterCd = "00691", service= "measurements", startDate = as.Date("2018-01-01"))
-
-dat %>%
-   summary()
 sixRiverschemistry %>%
   left_join(locations, by="Stream") -> sixRiverschemistry
   
+# NWIS Sites
+NWIS_meta <- readxl::read_xlsx(here("USGS_Data", "all_seak_DIC_from.NWIS.xlsx"), sheet="nwis_site_meta") %>%
+  mutate(Stream = site_no, LATITUDE = dec_lat_va, LONGITUDE = dec_long_va)%>%
+  distinct(LATITUDE, LONGITUDE, Stream) 
+
+NWIS_DIC <- readxl::read_xlsx(here("USGS_Data", "all_seak_DIC_from.NWIS.xlsx"), sheet="All_NWIS_SEAK_DIC") %>%
+  dplyr::select(Stream = site_no, sample_dt, DIC_p00691) %>%
+  mutate(Date = as.Date(sample_dt), DIC = as.numeric(DIC_p00691)) %>%
+  dplyr::select(-DIC_p00691, -sample_dt) %>%
+  filter(!is.na(DIC)) %>%
+  mutate(stream_site_no = Stream)
+
+NWIS_all <- readNWISdv(siteNumbers = NWIS_DIC$Stream, parameterCd = "00060") %>%
+  right_join(NWIS_DIC, by=c("Date", "site_no" = "stream_site_no")) %>%
+  dplyr::select(Date, Stream, DIC, discharge = X_00060_00003)
+
+# USGS Sites
+
 southeast_chemistry %>%
-  mutate(DATE = as.Date(DATE, format="%m/%d/%Y")) %>%
-  select(Stream = STAID, LATITUDE, LONGITUDE, Date = DATE, alkMol, pH = mean_daily_pH, Temp = mean_daily_tempC) %>%
-  bind_rows(sixRiverschemistry) %>%
-  select(-Alkalinity, -pCO2_measured, -Discharge) -> all_chemistry
+  dplyr::select(Stream = STAID, LATITUDE, LONGITUDE) %>%
+  bind_rows(NWIS_meta) %>%
+  bind_rows(locations) %>%
+  distinct(Stream, LATITUDE, LONGITUDE) -> toMatchSites
 
-all_chemistry_DIC <- carb(flag = 8, var1 = all_chemistry$pH, var2 = all_chemistry$alkMol, S=0, T = all_chemistry$Temp, k1k2 = "w14") %>%
-  mutate(S = "0")
+library(tmap)
+library(raster)
+library(ceramic)
+Sys.setenv(MAPBOX_API_KEY = "pk.eyJ1Ijoiam9obnJoYXJsZXkiLCJhIjoiY2tuaHo3aXBtMDl5YzJwcXJ5NTJqMjhsZSJ9.zm05WpFcoRicdpF1U7V8rg")
+coast <- read_sf(here("SEAKDB/Alaska_Coast_Map_Service", "Alaska_Coast_Map_Service.shp"))
+SEAK <- st_bbox(SEAKDB)
 
-sites_sf <- all_chemistry %>%
-  distinct(Stream, LATITUDE, LONGITUDE) %>%
+dem <- raster("C:/Users/John/Documents/Data Blog/DEM/shapefiles/shapefiles/dem_GOA.tif")
+
+dem <- projectRaster(dem, crs = "EPSG:4326")
+
+elevation <- crop(dem, SEAKDB)
+tmap_mode("plot")
+
+rivers <- read_sf(here("SEAKDB/HydroRIVERS_v10_na_shp/","HydroRIVERS_v10_na.shp"))
+rivers_ar <- read_sf(here("SEAKDB/HydroRIVERS_v10_ar_shp/","HydroRIVERS_v10_ar.shp"))
+seak_riv <- st_intersection(bind_rows(rivers,rivers_ar), SEAKDB)
+
+maj_rivers <- seak_riv %>%
+  group_by(MAIN_RIV) %>%
+  summarise(sum = sum(LENGTH_KM))
+
+big_rivs <- maj_rivers %>%
+  filter(sum > 800) %>%
+  pull(MAIN_RIV)
+
+plot_rivs <- seak_riv %>%
+  filter(MAIN_RIV %in% big_rivs) %>%
+  filter(ORD_STRA > 3) 
+
+plot_rivs <- plot_rivs %>%
+  mutate(lwd = case_when(ORD_STRA == "4"~ 0.5,
+                         ORD_STRA == "5"~ 1,
+                         ORD_STRA == "6"~ 2))
+
+sites_sf <- consistent_sites %>%
+  filter(n > 10) %>%
+  st_as_sf(coords = c("longitude","latitude"), crs=4236)
+
+
+river_labels <- data.frame(latitudes = c( 59.128987,  58.489841,  56.601264), 
+                           longitudes = c(-138.603145, -133.956547,-132.373400), 
+                           Major_Rivers =c("Alsek", "Taku", "Stikine")) %>%
+                          st_as_sf(coords = c("longitudes","latitudes"), crs = 4236)
+
+im <- cc_location(raster::extent(elevation))
+bbox_sf <- st_as_sfc(st_bbox(im))
+bbox_sf <- st_transform(bbox_sf, st_crs(SEAKDB))
+outline <- st_union(SEAKDB)
+mask <- st_difference(bbox_sf, outline)
+tmap_mode("plot")
+tm <- tm_shape(im) +
+    tm_graticules() +
+    tm_rgb() +
+    tm_shape(mask) +
+      tm_polygons(alpha = 0.7, col = "grey") +
+    tm_shape(outline) +
+      tm_borders(alpha=1, col = "black", lwd = 1) +
+    tm_style("natural") +
+  tm_shape(plot_rivs) +
+    tm_lines(col = "#24ffff", lwd = "lwd", legend.lwd.show = FALSE) + 
+  tm_shape(sites_sf) +
+      tm_symbols(size = 0.5, shape = 21, col = "#ffa200") +
+  tm_shape(river_labels) +
+    tm_symbols(size = 1, shape = 25, col = "Major_Rivers", palette = c("#009EFF", "#FF009E", "#9EFF00"), title.col = "Major Rivers") +
+  tm_credits("Satellite imagery - Mapbox NASA MODIS \nMajor Rivers - WWWF HydroSHEDS", size = 0.5, 
+             position=c("right", "bottom")) +
+  tm_scale_bar(color.dark = "black",
+    position = c("center", "top")) + 
+  tm_compass(type = "4star", size = 2.5, fontsize = 1,
+    color.dark = "black", text.color = "black", color.light = "grey60",
+    position = c("right", "top")) +
+  tm_add_legend('symbol', col = "#ffa200", shape = 21,	title="DIC Sample Sites") +
+  tm_layout(legend.position = c("left","bottom"))
+
+tmap_save(tm, "Figure1.png")
+```
+
+
+
+```{r} 
+# alaska municipal league
+# immunization program
+# spatial find closest
+
+sites_sf <- toMatchSites %>%
+  distinct(Stream, .keep_all = TRUE) %>%
   st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = st_crs(SEAKDB), agr = "constant")
 
+sites_sf <- st_make_valid(sites_sf)
+SEAKDB <- st_make_valid(SEAKDB)
+if(FALSE) {
 closest <- list()
 for(i in seq_len(nrow(sites_sf))){
   closest[[i]] <- SEAKDB[which.min(
     st_distance(SEAKDB, sites_sf[i,])),]
 }  
+}
+southeast_chemistry %>%
+  mutate(DATE = as.Date(DATE, format="%m/%d/%Y")) %>%
+  dplyr::select(Stream = STAID, LATITUDE, LONGITUDE, Date = DATE, alkMol, pH = mean_daily_pH, Temp = mean_daily_tempC) %>%
+  bind_rows(sixRiverschemistry) %>%
+  dplyr::select(-Alkalinity, -pCO2_measured, -Discharge) -> all_chemistry
 
-bind_rows(closest) %>%
-  select(OBJECTID) %>%
-  bind_cols(as.data.frame(sites_sf)) %>%
-  select(OBJECTID, Stream) %>%
-  right_join(all_chemistry, by="Stream") %>%
-  bind_cols(all_chemistry_DIC[c("DIC")]) -> all_chem_dic
+all_chemistry_DIC <- carb(flag = 8, var1 = all_chemistry$pH, var2 = all_chemistry$alkMol, S=0, T = all_chemistry$Temp, k1k2 = "w14") %>%
+  mutate(S = "0")
+
+SEAKDB_match <- closest %>%
+  dplyr::select(WS_ID, Stream)
+
+all_chemistry %>%
+  bind_cols(all_chemistry_DIC["DIC"]) %>%
+  mutate(DIC = DIC * 1000 * 12.01) %>%
+  bind_rows(NWIS_DIC) %>% 
+  left_join(SEAKDB_match, by="Stream")  -> all_chem_dic
 
 all_chem_dic %>%
+  mutate(nchar = nchar(Stream)) %>%
+  filter(nchar > 7) %>%
+  distinct(Stream) %>%
+  filter(Stream != "Mendenhall" & Stream != "Peterson") %>%
+  pull(Stream) -> stream_tometa
+
+readNWISsite(siteNumbers = stream_tometa) %>%
+  select(site_no, station_nm, drain_area_va) -> USGS_meta
+
+all_chem_dic %>%
+  left_join(USGS_meta, by=c("Stream" = "site_no")) -> all_chem_dic
+
+dic_fig <- all_chem_dic %>%
   group_by(Stream) %>%
   add_tally() %>%
-  filter(n > 20) %>%
-  ggplot(aes(x=Stream, y=DIC * 1000 * 12.01)) +
+  filter(n > 10) %>%
+  ggplot(aes(x=station_nm, y=DIC)) +
   geom_boxplot() +
   geom_hline(yintercept = c(1.7, 16.6), linetype="dashed", color="red") +
   geom_hline(yintercept = 5.3, color="red") +
   annotate(geom= "text", x=4, y=15, label = "range from Stackpoole 2017", color="red") +
     stat_summary(fun.data = give.n, geom = "text", fun.y = median,
                   position = position_dodge(width = 0.75)) +
-  ggsave("DIC.png", height=6, width=10, dpi=300)
-
-
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+  
+ggsave("DIC.png",dic_fig, height=12, width=10, dpi=300)
 
 all_chem_dic %>%
-  mutate(month = lubridate::month(Date)) %>% 
-  filter(Stream %in% c("Cowee", "Herbert", "Fish", "Peterson", "Mendenhall", "Montana")) %>%
-  filter(month > 4) %>%
-  mutate(month = as.factor(month)) %>% 
-  ggplot(aes(x=month, y=DIC*1000*12.01, fill=Stream)) +
-  geom_boxplot() +
-  scale_x_discrete(breaks = 1:12, labels=month.abb) +
-  labs(x="", y="DIC in mg/L") +
-  scale_fill_viridis_d() +
-    stat_summary(fun.data = give.n, geom = "text", fun.y = median,
-                  position = position_dodge(width = 0.75)) +
-  ggsave("a.png", height=6, width = 8, dpi=300)
+  mutate(month = lubridate::month(Date)) %>%
+  filter(DIC < 20) %>%
+  ggplot(aes(x=month, y=DIC)) +
+  geom_boxplot(aes(x=as.factor(month))) +
+  geom_smooth() +
+  scale_x_discrete(labels = month.abb) +
+  guides(color=FALSE) 
 ```
 
-# Calculating alkalinity from pH and measured pCO2
+# Litho and slope
 
 ```{r, echo=FALSE, message=FALSE, warning=FALSE}
 
-carb(flag = 1, var1 = sixRiverstemp$pH, var2 = sixRiverstemp$pCO2_measured, T = sixRiverstemp$Temp) %>%
-  bind_cols(sixRiverschemistry) %>%
-  ggplot(aes(x=alkMol, y=ALK/(1000000 * 12)))+
+litho <- st_read(here("Lithology", "Lithology_Combined.shp"))
+
+litho <- st_transform(litho, crs = st_crs(SEAKDB))
+
+SEAKDB %>%
+  as.data.frame() %>%
+  select(WS_ID, SHAPE_Area) -> total_area
+
+vars <- c("ss", "ig", "pi", "sm", "pa", "vi", "vb", "mt")
+
+litho %>%
+  as.data.frame() %>%
+  select(WS_ID, xx, Shape_Area) %>%
+  pivot_wider(names_from = xx, values_from = Shape_Area, values_fn = mean) %>%
+  right_join(total_area, by=c("WS_ID" = "WS_ID")) %>%
+  mutate_at(vars, funs(./SHAPE_Area)) %>%
+  right_join(all_chem_dic, by=c("WS_ID" = "WS_ID")) -> all_DIC_Litho
+
+all_DIC_Litho %>%
+  mutate(highlight = ifelse(WS_ID == "2149", "Big Creek",  "Other")) %>%
+  ggplot(aes(x=DIC, y=sm, color=highlight)) +
+  geom_point()
+  
+mean_slope <- readxl::read_xlsx(here("Lithology", "MeanSlope_by_watershed.xlsx"), sheet = "MeanSlope_by_watershed")
+
+all_DIC_Litho %>%
+  left_join(mean_slope, by=c("WS_ID")) %>%
+  ggplot(aes(x=MIN, y=DIC)) +
+  geom_point()+
+  geom_smooth(method="lm") 
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+SEAKDB %>%
+  left_join(clust, by="WS_ID") -> ws_clust
+  
+clustpal <- colorFactor(rainbow(3), ws_clust$clust)
+
+all_chem_dic %>%
+  mutate(WS_ID = if_else(station_nm == "SALMON R NR HYDER AK", 561, as.numeric(WS_ID))) %>%
+  left_join(clust, by="WS_ID") -> all_chem_dic_clust
+
+all_chem_dic_clust %>% 
+  mutate(month = lubridate::month(Date)) %>%
+  group_by(clust, month) %>% 
+  filter(!is.na(clust)) %>%
+  summarise(meanDIC = median(DIC, na.rm = TRUE), seDIC = sd(DIC) / (sqrt(length(DIC)))) %>%
+  ggplot(aes(x=month, y=meanDIC, color=clust)) +
+  geom_point() +
+  geom_errorbar(aes(x=month, ymin = meanDIC - seDIC, ymax=meanDIC + seDIC), width=0.6) +
+  geom_line()
+
+all_chem_dic_clust %>% 
+  mutate(month = lubridate::month(Date)) %>%
+  group_by(Stream) %>%
+  add_tally() %>%
+  filter(n > 8) %>%
+  group_by(clust, month, Stream) %>% 
+  filter(!is.na(clust)) %>%
+  summarise(meanDIC = mean(DIC, na.rm = TRUE), seDIC = sd(DIC) / (sqrt(length(DIC)))) %>%
+  ggplot(aes(x=month, y=meanDIC, color=clust, group=Stream)) +
+  geom_point() +
+  geom_line() +
+  facet_wrap(~clust) 
+
+all_chem_dic_clust %>%
+  mutate(stream_site_no = Stream) -> toDischarge
+
+get_stream_data <- function(data, output=TRUE) {
+  
+  # defining which variables we want
+  pCode <- "00060" # this corresponds to daily discharge
+  start.date <- as.character(min(toDischarge$Date)) # this is a super fast API, we can extract as much data as we want
+  end.date <- as.character(max(toDischarge$Date)) # make sure it's up to date
+
+  data %>%
+    ungroup() %>%
+    select(stream_site_no) %>%
+    na.omit() %>%
+    filter(!stream_site_no %in% c("Cowee", "Herbert", "Peterson", "Montana", "Mendenhall", "Fish")) %>%
+    unique() %>%
+    filter(nchar(as.character(stream_site_no)) > 7) %>%
+    .[[1]] %>%
+    as.character() %>%
+    as.list() -> USsiteNos
+
+  
+  # importing the data #
+  dataRetrieval::readNWISdv(siteNumbers = unlist(USsiteNos),
+                      parameterCd = pCode,
+                      startDate = start.date,
+                      endDate = end.date) %>%
+  left_join(dataRetrieval::readNWISsite(USsiteNos), by="site_no") %>%
+  select(site_no, Date, discharge=X_00060_00003, station_nm, 
+         stream_name=station_nm) -> streams
+  # removing erroneous values #
+  streams$discharge[streams$discharge < 0] <- NA
+  
+  streams$Date <- as.Date(streams$Date)
+  if(missing(output)) { 
+    NULL 
+    } else {
+  if(output=="TRUE") {
+    stream_data <<- streams
+  } else {
+    NULL
+  }
+    }
+  data %>%
+    mutate(Date=as.Date(Date)) %>%
+  left_join(streams, by=c("stream_site_no"="site_no", "Date")) %>%
+  return()
+
+}
+
+discharge <- get_stream_data(toDischarge, output=TRUE) 
+
+stream_data %>%
+  group_by(site_no) %>%
+  filter(!is.na(discharge)) %>%
+  #mutate(scaled_discharge = scales::rescale(discharge, to=c(0.1,100))) %>%
+  mutate(scaled_discharge = discharge/mean(discharge)) -> scaled_stream_data
+
+all_UAS_discharge %>%
+  group_by(Stream) %>%
+  filter(!is.na(Discharge)) %>%
+  #mutate(scaled_discharge = scales::rescale(Discharge, to=c(0.1,100))) %>%
+  mutate(scaled_discharge = Discharge/mean(Discharge)) %>%
+  select(scaled_discharge, site_no = Stream, Date) %>%
+  mutate(Stream = site_no) %>%
+  bind_rows(scaled_stream_data) -> scaled_stream_data
+
+discharge %>%
+  left_join(all_UAS_discharge, by=c("Stream", "Date")) %>%
+  mutate(yday = lubridate::yday(Date)) %>%
+  filter(!is.na(clust)) %>%
+  mutate(discharge = ifelse(is.na(discharge), Discharge, discharge)) %>%
+  group_by(Stream) %>%
+  add_tally() %>%
+  left_join(scaled_stream_data, by=c("Date", "Stream" = "site_no")) %>% 
+  filter(!is.na(scaled_discharge)) %>%
+  ungroup() -> scaled_data
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+b <- scaled_stream_data %>% 
+  mutate(month = lubridate::month(Date)) %>%
+  left_join(SEAKDB_match, by=c("site_no" = "Stream")) %>%
+  left_join(clust, by="WS_ID") %>%
+  group_by(month, site_no, clust) %>% filter(!is.na(clust)) %>%
+    mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  summarise(scaled_discharge = mean(scaled_discharge,na.rm=TRUE)) %>%
+  ggplot(aes(x=month, y=scaled_discharge, color=clust, group=site_no)) +
+  geom_line(alpha=0.6) +
+  theme_bw() +
+  scale_x_continuous(breaks = seq(1, 11, 2), labels = c("Jan","Mar", "May", "Jul", "Sep", "Nov")) +
+  scale_color_manual(values = cbPalette) +
+  facet_wrap(~clust) +
+  labs(x = "", y = "Scaled average monthly discharge (unitless)", tag = "b)", 
+       title = "Measured discharge scaled to average") +
+  guides(color = FALSE) 
+
+  ggsave("scaled_discharge.png", b, height = 4, width = 6)
+
+scaled_stream_data %>%
+  left_join(all_chem_dic, by=c("site_no" = "Stream", "Date" = "Date")) %>%
+  filter(scaled_discharge > 0) %>%
+  filter(!is.na(DIC)) -> scaled_DIC_data
+
+DIC_model <- lm(DIC~log(scaled_discharge), data = scaled_DIC_data)
+
+temp_var <- as.data.frame(predict(DIC_model, interval="prediction"))
+
+new_df <- cbind(scaled_DIC_data, temp_var)
+
+lm_eqn <- function(df){
+    m <- lm(DIC ~ log(scaled_discharge), new_df);
+    eq <- substitute(italic(DIC) == a + b %.% italic(log(ScaledDischarge))*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+ggplot(new_df, aes(x=scaled_discharge,y=DIC)) +
+  geom_point(alpha=0.3) +
+  guides(color=FALSE) +
+  geom_smooth(method="lm", formula = y~log(x)) +
+   geom_line(aes(y=lwr), color = "red", linetype = "dashed")+
+    geom_line(aes(y=upr), color = "red", linetype = "dashed") +
+  geom_text(x=50, y=25, label=lm_eqn(new_df), parse=TRUE)
+
+
+fig4 <- scaled_data %>%
+  select(Stream, DIC, scaled_discharge) %>%
+  bind_rows(scaled_DIC_data) %>%
+  group_by(Stream) %>%
+  add_tally() %>%
+  filter(!is.na(Stream) & !is.na(DIC) & n > 15) %>%
+  ggplot(aes(x=scaled_discharge, y=DIC)) +
+  geom_point()+
+  guides(color=FALSE) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  facet_wrap(~Stream, scales="free") +
+  labs(x = "Scaled discharge (unitless)", y = expression(paste("DIC in ", mu, "mol C kg" ^-1))) +
+  geom_smooth(method="lm", formula = y~log(x)) 
+
+
+ggsave("Figure4.png",fig4, height=10, width=10, dpi=300) 
+```
+
+## Karst Data
+Frances provided karst coverage after discovering that some creeks had anomolously high DIC concentrations which might be driven by karst composition of the watershed. 
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+karst <- readxl::read_xlsx(here("Lithology", "Karst_by_watershed_clean_for_John.xlsx"), sheet = "Karst_area_clean_summary")
+
+karst_dic <- all_chem_dic %>%
+    mutate(WS_ID = ifelse(Stream == "15008000", 818, WS_ID)) %>%
+    left_join(karst, by=c("WS_ID" = "wsid")) 
+
+karst <- karst_dic %>% 
+  mutate(karstFlag = case_when(karst_cover_perc <= 0 ~ "0",
+                               karst_cover_perc > 0  ~ "1")) %>% 
+  filter(DIC < 30) %>%
+  filter(!is.na(karstFlag)) %>%
+  ggplot(aes(x=karstFlag, y=DIC, fill=karstFlag)) +
+  geom_boxplot(alpha=0.4) +
+  geom_jitter(aes(color = Stream)) + guides(color = FALSE) +
+  annotate(geom = "text", x = 0.8, y = 8, label = "n = 928") +
+  annotate(geom = "text", x = 1.8, y = 11, label = "n = 916") +
+  scale_x_discrete(labels = c("No karst", ">0% karst")) +
+  labs(x="Karst coverage", y=expression(paste("DIC in ", mu, "mol C kg" ^-1))) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  scale_fill_viridis_d() +
+  scale_y_continuous(breaks = seq(0, 30, 5)) +
+  guides(fill = FALSE) 
+  
+ggsave("karst.png",karst, height=4, width=4, dpi=300)
+
+  
+# random effect measure
+  
+library(lme4)
+library(lmerTest)
+test_data <-  karst_dic %>% 
+  mutate(karstFlag = case_when(karst_cover_perc <= 0 ~ "no karst",
+                               karst_cover_perc > 0  ~ "karst")) %>%
+  filter(!is.na(karstFlag))
+  
+summary(lmer(DIC ~ karstFlag* + (1 | Stream), data = test_data))
+
+
+aov(DIC ~ karstFlag + Error(Stream), data = test_data) %>%
+  summary()
+
+
+
+karst_dic %>%  
+  mutate(karstFlag = case_when(karst_cover_perc <= 0 ~ "0",
+                               karst_cover_perc > 0  ~ "1")) %>% 
+  mutate(karstFlag= as.factor(karstFlag)) -> karst_test
+
+library(rstatix)
+games_howell_test(data = karst_test, DIC~karstFlag)
+
+karst_match <- karst_test %>%
+  distinct(WS_ID, Stream, karstFlag)
+
+scaled_data %>%
+  filter(scaled_discharge >0) %>%
+  group_by(Stream) %>%
+  left_join(karst_match, by="WS_ID") %>%
+  mutate(karstFlag = factor(karstFlag, levels=0:1, 
+                            labels = c("No karst", "> 0% karst"))) %>%
+  ggplot(aes(x=scaled_discharge, y=DIC)) +
+  geom_point(alpha=0.5)+
+  guides(color=FALSE) +
+  facet_wrap(~karstFlag, scales='free_x', ncol=1) +
+  geom_smooth(method="lm", formula = y~log(x)) +
+  theme_bw() +
+  ggsave("scaled.png", height=6, width=6, dpi=300) 
+  
+```
+# modelling equations
+We are going to use measured DIC values and discharge calculations to calculate a relationship between flow and DIC concentration, then use flux per unit area to calculate yield per acre for each karst group.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+areaCompare %>%
+  select(Stream, SHAPE_Area, drainArea) %>%
+  mutate(percent = drainArea/SHAPE_Area) -> area_match
+
+stream_data %>%
+  select(Date, Stream = site_no, discharge, stream_name) -> usgs_discharge
+
+all_UAS_discharge %>%
+  mutate(discharge = Discharge, stream_name = Stream) %>%
+  select(Date, Stream, discharge, stream_name) %>%
+  bind_rows(usgs_discharge) %>%
+  select(Date, Stream, discharge, stream_name) -> all_discharge
+
+all_chem_dic %>%
+  mutate(WS_ID = case_when(Stream == "15008000" ~ as.integer(818),
+                           TRUE ~ WS_ID)) %>%
+  left_join(all_discharge, by=c("Stream" = "Stream", "Date" = "Date")) %>%
+  left_join(area_match, by=c("Stream"= "Stream")) %>%
+  group_by(Stream) %>%
+  filter(!is.na(discharge)) %>%
+  tally() %>%
+  filter(n > 8) %>%
+  pull(Stream) -> stream_list
+
+get_loadflex_predictions <- function(Stream){
+  require(loadflex)
+  require(rloadest)
+  all_chem_dic %>%
+    filter(Stream == !!Stream) %>%
+    left_join(all_discharge, by=c("Stream" = "Stream", "Date" = "Date")) %>%
+    select(Date, DIC, Stream, discharge) %>% 
+    filter(discharge > 0) %>%
+    filter(complete.cases(.)) %>%
+    distinct(Date, .keep_all = TRUE) -> intdat
+
+  
+# get discharge data for estimating flux 
+  all_discharge %>%
+    filter(Stream == !!Stream) -> estDat
+
+  meta <- metadata(constituent="DIC", flow="discharge", 
+    dates="Date", conc.units="mg L^-1", flow.units="cfs", load.units="g", 
+    load.rate.units="g d^-1", site.name="Site",
+    consti.name="DIC", site.id="", lat=58.3069	, lon=-134.3884)
+
+  DIC_reg2 <- loadReg2(loadReg(DIC ~ model(7), data=intdat,
+                             flow="discharge", dates="Date", time.step="day", 
+                             flow.units="cfs", conc.units="mg/L", load.units="g"))
+
+  DIC_comp <- loadComp(reg.model=DIC_reg2, interp.format="conc", 
+                     interp.data=intdat, store='uncertainty')
+
+  estDat <- estDat %>%
+    filter(discharge > 0) %>%
+    distinct(Date, .keep_all = TRUE) %>%
+    filter(!is.na(discharge))
+     
+  preds_load <- predictSolute(DIC_comp, "conc", estDat, se.pred=TRUE, date = TRUE, agg.by = "day") %>%
+    bind_cols(estDat)
+  return(preds_load)
+  
+}
+
+allPredictions <- stream_list %>%
+  map_df(get_loadflex_predictions) 
+
+write.csv(allPredictions,"outputs/allPredictions.csv")
+
+allPredictions %>%
+  left_join(SEAKDB_match, by="Stream") %>%
+  left_join(clust, by="WS_ID") %>%
+  left_join(karst_match, by="WS_ID") %>%
+  mutate(month = lubridate::month(Date)) %>%
+  mutate(karstFlag = ifelse(karstFlag == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  group_by(month, karstFlag, clust) %>%
+  filter(!is.na(clust)) %>%
+  summarise(meanConc = mean(conc, na.rm = TRUE), lower = quantile(conc, 0.25, na.rm = TRUE),
+            upper = quantile(conc, 0.75, na.rm = TRUE)) -> concentration_predictions
+
+
+c <- concentration_predictions %>%
+  filter(!is.na(karstFlag)) %>%
+  ggplot(aes(x=month, y=meanConc, color=clust)) +
+  geom_line() +
+  theme_bw() +
+  geom_ribbon(aes(x=month, ymin = lower, ymax = upper, fill=clust), alpha=0.2, color = NA) +
+  facet_grid(clust~karstFlag) +
+  scale_color_manual(values = cbPalette) +
+  scale_fill_manual(values = cbPalette) +
+  scale_x_continuous(breaks = seq(1, 11, 2), labels = c("Jan","Mar", "May", "Jul", "Sep", "Nov")) +
+  guides(fill = FALSE, color = FALSE) +
+  scale_x_continuous(breaks=1:12, labels=month.abb) +
+  labs(y=expression(paste("Average monthly DIC in  ", mu, "mg C L" ^-1)),x = "", 
+       tag = "c)", title = "Measured DIC concentrations") 
+
+```
+Now we have our concentration estimates, we can build flux estimates using the DWCBM.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+drainageChars <- readxl::read_xlsx(here("SEAKDB", "TABLE_A_Watershed_variables_for_SEAKDB_DOC_flux_estimates.xlsx"), sheet = "Watershed_variables")[,1:6]
+
+drainageRunoff <- readxl::read_xlsx(here("SEAKDB", "SEAKDB_watersheds_runoff_DOC.xlsx"), sheet = "Runoff_and_DOC")[,1:27]
+
+cols <- drainageRunoff %>%
+  select(ends_with("m3")) %>%
+  names(.)
+
+cumecs_to_L <- function(x) {
+  x * 1000 %>%
+    return()
+}
+
+drainageRunoff %>%
+  group_by(WS_ID) %>%
+  select(ends_with("m3")) %>%
+  mutate_if(is.numeric, list(cumecs_to_L)) %>% # have to convert the output of cumecs to Liters here to match concentrations
+  pivot_longer(names_to = "month", values_to = "discharge", -WS_ID) %>%
+  mutate(month = case_when(month == "JAN_Mean_RO_m3" ~ 1,
+                           month == "FEB_Mean_RO_m3" ~ 2,
+                           month == "MAR_Mean_RO_m3" ~ 3,
+                           month == "APR_Mean_RO_m3" ~ 4,
+                           month == "MAY_Mean_RO_m3" ~ 5,
+                           month == "JUN_Mean_RO_m3" ~ 6,
+                           month == "JUL_Mean_RO_m3" ~ 7,
+                           month == "AUG_Mean_RO_m3" ~ 8,
+                           month == "SEP_Mean_RO_m3" ~ 9,
+                           month == "OCT_Mean_RO_m3" ~ 10,
+                           month == "NOV_Mean_RO_m3" ~ 11,
+                           month == "DEC_Mean_RO_m3" ~ 12)) %>%
+  left_join(clust, by="WS_ID") %>%
+  left_join(karst, by=c("WS_ID" = "wsid")) %>% 
+  mutate(karstFlag = ifelse(karst_cover_perc == "0", "No karst", ">0% karst")) %>%
+  mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) -> discharge_DWCBM
+  
+discharge_DWCBM %>%
+  left_join(concentration_predictions, by=c("month", "clust", "karstFlag")) %>%
+  mutate(Flux = discharge * meanConc, lowerFlux = discharge * lower, upperFlux = discharge * upper) -> flux_estimates
+
+flux_estimates %>%
+  write.csv("flux_estimates.csv")
+
+flux_estimates %>%
+  group_by(clust, karstFlag) %>%
+  filter(!is.na(clust)) %>%
+  summarise(totalFlux = sum(Flux)/1e15) %>%
+  pivot_wider(names_from = karstFlag, values_from = totalFlux) %>%
+  mutate(total = `>0% karst` + `No karst`)
+
+
+flux_estimates %>%
+  group_by(month) %>%
+    summarise(totalFlux = sum(Flux, na.rm = TRUE)/1e15, lowerFluxTotal = sum(lowerFlux/1e15, na.rm = TRUE), 
+              upperFluxTotal = sum(upperFlux/1e15, na.rm = TRUE)) %>%
+  mutate(yield = totalFlux * 1e12 /sum(SEAKDB$SHAPE_Area), loweryield = lowerFluxTotal * 1e12 / sum(SEAKDB$SHAPE_Area),
+         upperyield = upperFluxTotal* 1e12  / sum(SEAKDB$SHAPE_Area)) %>%
+  mutate(month = month.abb) %>%
+  write.csv("fluxtable.csv")
+
+sum(SEAKDB$SHAPE_Area)/1e9
+
+flux_estimates %>%
+  group_by(clust) %>%
+    summarise(totalFlux = sum(Flux, na.rm = TRUE)/1e15, area = sum(ws_area_sq_met, na.rm = TRUE)/12) %>%
+  mutate(yield = totalFlux * 1e12 / area) %>%
+  ungroup() %>%
+  mutate(sum = sum(area, na.rm=TRUE))
+
+text_annotations <- flux_estimates %>% 
+  group_by(clust, karstFlag) %>%
+  mutate(n = n_distinct(WS_ID)) %>%
+  group_by(month, clust, karstFlag) %>%
+  filter(!is.na(clust)) %>%
+  summarise(totalFlux = sum(Flux)/1e15, lower = sum(lowerFlux)/1e15, upper = sum(upperFlux)/1e15, n = median(n)) %>%
+  group_by(clust, karstFlag) %>%
+  summarise(n = median(n)) 
+
+text_annotations$month <- 2
+text_annotations$totalFlux <- c(0.2,0.2,0.013,0.013,0.05,0.05)
+d <- flux_estimates %>% 
+  group_by(clust, karstFlag) %>%
+  mutate(n = n_distinct(WS_ID)) %>%
+  group_by(month, clust, karstFlag) %>%
+  filter(!is.na(clust)) %>%
+  summarise(totalFlux = sum(Flux)/1e15, lower = sum(lowerFlux)/1e15, upper = sum(upperFlux)/1e15) %>%
+  ggplot(aes(x=month, y=totalFlux, color=clust)) +
+  geom_line(color="black") +
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill = clust), alpha=0.2) +
+    scale_fill_manual(values = cbPalette) +
+      scale_color_manual(values = cbPalette) +
+  facet_grid(clust~karstFlag, scales="free_y") +
+  labs(y = "Flux DIC in Tg", x= "", tag = "d)", title = "Modelled DIC flux") +
+  guides(color = FALSE, fill = FALSE) +
+  scale_x_continuous(breaks = seq(1, 11, 2), labels = c("Jan","Mar", "May", "Jul", "Sep", "Nov")) +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+  geom_text(aes(label = paste0("n=", n)), data = text_annotations)
+d
+```
+
+Computing flux as CO2/HCO3
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+
+flux_estimates %>%
+  left_join(percent_HCO3, by = c("karstFlag", "clust")) %>%
+  mutate(HCO3_flux = Flux * mean, CO2_flux = Flux * (1-mean)) -> composition_estimates
+
+```
+
+# Basin summaries
+```{r}
+
+marineZones <- read_sf(here("SEAKDB", "mz02ap19.shp"))
+
+marineZones %>%
+  filter(WFO == "AJK" & ID != "PKZ052") -> ak_zones
+  
+ak_zones %>%
+  ggplot() +
+  geom_sf(aes(fill = NAME)) +
+  geom_sf(data = SEAKDB) +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 6)) +
+  labs(fill = "")
+
+low_pts <- read_sf(here("SEAKDB/Lowest", "lowest_points.shp"))
+
+ak_zones <- st_transform(ak_zones, crs = st_crs(low_pts))
+
+matchMarineZones <- find_closest_polygon(shape=ak_zones, pts = low_pts)
+
+StikineList <- c(1602, 1679, 1628, 1629, 1632, 1636:1649, 1645, 2475, 1653, 1656)
+
+SumnerList <- c(1630)
+
+matchMarineZones %>%
+  mutate(ID = ifelse(WS_ID %in% StikineList, "PKZ036", ID)) %>%
+  mutate(ID = ifelse(WS_ID %in% SumnerList, "PKZ035", ID)) %>%
+  mutate(NAME = ifelse(WS_ID %in% SumnerList, "Sumner Strait", NAME)) %>%
+  mutate(NAME = ifelse(WS_ID %in% StikineList, "Clarence Strait", NAME)) %>%
+  select(WS_ID, ID, NAME) -> lowsPtsMatch
+
+SEAKDB %>%
+  left_join(lowsPtsMatch, by="WS_ID") %>%
+  ggplot() +
+  geom_sf(aes(fill = NAME), alpha=0.8) + 
+  geom_sf(aes(fill = NAME), data = ak_zones, alpha=0.4) +
+  theme_minimal() +
+  theme(legend.text = element_text(size = 11)) +
+  labs(fill = "") +
+  theme(legend.position = c(0.22, 0.3)) +
+  ggsave("WSmapAdjusted.png", height=12, width=14, dpi=300)
+
+
+library(RColorBrewer)
+# Define the number of colors you want
+nb.cols <- 16
+mycolors <- colorRampPalette(brewer.pal(8, "Set1"))(nb.cols)
+
+
+flux_estimates %>%
+  right_join(lowsPtsMatch, by="WS_ID") %>%
+  group_by(NAME, month, ID) %>%
+  summarise(totalFlux = sum(na.omit(Flux))/1e15, lower = sum(na.omit(lowerFlux))/1e15, 
+            upper= sum(na.omit(upperFlux))/1e15) %>%
+  ggplot() +
+  geom_ribbon(aes(x=month, ymin = lower, ymax=upper, fill = NAME), alpha=0.4) +
+  facet_wrap(~NAME, ncol = 4, scales = "free_y") +
+  theme_minimal() +
+  guides(fill = FALSE) + 
+  scale_x_continuous(breaks = c(2,5,8,11), labels = c("Feb","May","Aug","Nov")) +
+  geom_line(aes(x=month, y=totalFlux)) +
+  theme(strip.text.x = element_text(size = 6)) +
+  labs(x = "", y="DIC flux in Tg C") +
+  ggsave("flux.png", height=6, width=8, dpi=300)
+
+# daily interpolation
+  
+
+interpFlux <- flux_estimates %>%
+  filter(!is.na(Flux)) %>%
+  mutate(Date = case_when(month < 12 ~ as.Date(paste("2020", month, "01", sep='-')),
+                          month >= 12 ~as.Date(paste("2020", month, "31", sep='-')))) %>%
+  group_by(WS_ID) %>%
+  complete(Date = seq.Date(as.Date("2020-01-01"), as.Date("2020-12-31"), by = "day")) %>%
+  mutate(FluxDaily = Flux / 30.41, dischargeDaily = discharge / 30.41) %>%
+  mutate(FluxInterpolated = imputeTS::na_interpolation(FluxDaily), 
+         dischargeInterpolated = imputeTS::na_interpolation(dischargeDaily))
+
+
+flux_estimates %>%
+  right_join(lowsPtsMatch, by="WS_ID") %>%
+  group_by(NAME) %>%
+  summarise(TotalFlux = sum(Flux, na.rm = TRUE) / 1e15, Upper = sum(upperFlux, na.rm = TRUE)/ 1e15, 
+            Lower = sum(lowerFlux, na.rm=TRUE)/ 1e15) %>%
+  write.csv("flux_area.csv")
+
+interpFlux %>%
+  left_join(lowsPtsMatch, by="WS_ID") %>%
+  group_by(NAME, Date) %>%
+  summarise(AreaFlux = sum(FluxInterpolated)) -> regionInterpolated
+
+regionInterpolated %>%
+  ggplot(aes(x=Date, y=AreaFlux, color=NAME)) +
+  geom_line() +
+  scale_y_log10()
+
+quantile(all_chem_dic$DIC, probs = c(.05,0.5, 0.95))
+
+
+```
+
+```{r, eval = FALSE}
+create_images <- function() {
+ pb = txtProgressBar(min = 0, max = 365, initial = 0) 
+library(cowplot)
+  for(i in 1:365) {
+    filename <- sprintf("%03d.png", i)
+    dat <- paste(format(as.Date(i, origin = "2019-12-31"), format = "%b-%d"))
+
+  map <- ak_zones %>%
+    right_join(regionInterpolated, by="NAME") %>%
+    group_by(NAME)%>%
+    mutate(scale = rescale(AreaFlux, rlow = 0.001, rhigh = 1.0)) %>% 
+    filter(Date == as.Date(i,origin = "2019-12-31"))%>%
+      ggplot() +
+      geom_sf(aes(fill = NAME, alpha=scale)) +
+      geom_sf(fill = "grey80", data = SEAKDB) +
+      guides(alpha=FALSE, fill = FALSE) +
+     ggthemes::theme_map() +
+    theme(plot.margin=unit(c(0,0,0,0),"mm"))
+
+  
+regionLimits <- regionInterpolated %>%
+   group_by(NAME) %>%
+   summarise(ymin = min(AreaFlux), ymax = max(AreaFlux)) %>%
+  pivot_longer(-NAME, values_to = "AreaFlux") %>%
+  mutate(Date = case_when(name == "ymin" ~ as.Date("2019-12-31"),
+                          name == "ymax" ~ as.Date("2020-12-31")))
+ 
+  graph <-  ak_zones %>%
+    right_join(regionInterpolated, by="NAME") %>%
+    group_by(NAME)%>%
+    filter(Date <= as.Date(i,origin = "2019-12-31")) %>%
+    ggplot(aes(x=Date, y=AreaFlux / 1e12, color = NAME)) +
+    geom_line(size = 2)  +
+    guides(color = FALSE) +
+      theme(strip.text.x = element_text(size = 6)) +
+    geom_blank(data = regionLimits) +
+    theme_minimal() +
+    facet_wrap(~NAME, ncol=4, scales = "free_y") +
+    labs(y = "Flux in gigagrams C") +
+      scale_x_date(date_labels = "%b") 
+  title <- ggdraw() + 
+  draw_label(
+    dat,
+    fontface = 'bold',
+    x = 0,
+    hjust = 0) +
+  theme(plot.margin = margin(0, 0, 0, 7))
+  plot_row <- plot_grid(map, graph)
+  combined <- cowplot::plot_grid(title, plot_row, ncol = 1, rel_heights = c(0.1, 1))
+
+  ggsave(combined, filename = here("InterpFlux", filename), height = 8, width=19, dpi=90)
+ 
+    setTxtProgressBar(pb,i)
+  }
+}
+
+create_images()
+
+
+
+```
+
+
+```{r, echo=FALSE}
+
+composition_estimates %>%
+  right_join(lowsPtsMatch, by="WS_ID") %>%
+  group_by(NAME, ID) %>%
+  summarise(totalHCO3 = sum(na.omit(HCO3_flux))/1e15, lowerHCO3 = sum(na.omit(lowerFlux * mean))/1e15, 
+            upperHCO3 = sum(na.omit(upperFlux * mean))/1e15, TotalFlux = sum(Flux, na.rm = TRUE) / 1e15, Upper = sum(upperFlux, na.rm = TRUE)/ 1e15, 
+            Lower = sum(lowerFlux, na.rm=TRUE)/ 1e15, totalCO2 = sum(na.omit(CO2_flux))/1e15) %>%
+  mutate(ratio = na.omit(totalHCO3)/na.omit(totalCO2)) -> composition_flux
+
+
+SEAKDB_one <- st_union(SEAKDB)
+
+ak_zones %>%
+    right_join(composition_flux, by="NAME") %>%
+    group_by(NAME) %>%
+    ggplot() +
+    geom_sf(aes(fill = ratio)) +
+    geom_sf(fill = "grey80", data = SEAKDB_one) +
+    scale_fill_distiller(palette = "RdYlBu", direction = 1) +
+    theme_minimal() +
+    labs(fill = "HCO3/CO2 ratio", title = "DIC species flux") +
+  ggsave("MarineRatio.png")
+
+all_chemistry_DIC %>%
+  bind_cols(all_chemistry %>%
+              select(Stream, Date)) %>%
+  mutate(HCO3/DIC) %>%
+  summary()
+
+all_chemistry_DIC %>%
+  bind_cols(all_chemistry %>%
+              select(Stream, Date)) %>%
+  mutate(yday = lubridate::yday(Date)) %>%
+  mutate(Stream = as.character(Stream)) %>%
+  left_join(SEAKDB_match, by = "Stream") %>%
+  left_join(clust, by = "WS_ID") %>%
+  group_by(Stream) %>%
+  add_tally() %>%
+  filter(!is.na(clust)) %>%
+   mutate(clust = case_when(clust == "1" ~ "glacial",
+                           clust == "2" ~ "snow and rain", 
+                           clust == "3" ~ "rain")) %>%
+  ggplot(aes(x=yday, y=ALK/DIC)) +
+  geom_point() +
+  facet_wrap(~clust, scales = "free_x") +
+  ggsave("alkdic.png")
+
+
+all_chemistry_DIC %>%
+  bind_cols(all_chemistry %>%
+              select(Stream, Date)) %>%
+  left_join(SEAKDB_match, by="Stream") %>%
+  left_join(all_DIC_Litho[,1:20], by="WS_ID") %>%
+  select(Stream, HCO3,DIC, ss, ig, pi, sm, pa, vi, vb, mt, pb, sc, nd, su, va, py, wb, ev, cl, pb, sc, nd, su, va, py, wb, ev, cl) %>%
+  pivot_longer(-c(HCO3,DIC,Stream), names_to = "class", values_to = "coverage") %>%
+  filter(!is.na(coverage)) %>%
+  group_by(Stream, HCO3, DIC) %>%
+  slice(which.max(coverage)) %>%
+  group_by(class) %>%
+  add_tally() %>%
+  filter(n > 15) %>%
+  mutate(ratio = HCO3/DIC) %>%
+  ggplot(aes(x=class, y = ratio)) +
+  geom_boxplot() +
+  labs(y = "Percent DIC that is HCO3") +
+  guides(color = FALSE)
+
+all_chemistry_DIC %>%
+  bind_cols(all_chemistry %>%
+              select(Stream, Date)) %>%
+  left_join(SEAKDB_match, by="Stream") %>%
+  left_join(all_DIC_Litho[,1:20], by="WS_ID") %>%
+  select(Stream, HCO3,DIC, ss, ig, pi, sm, pa, vi, vb, mt, pb, sc, nd, su, va, py, wb, ev, cl, pb, sc, nd, su, va, py, wb, ev, cl) %>%
+  pivot_longer(-c(HCO3,DIC,Stream), names_to = "class", values_to = "coverage") %>%
+  filter(!is.na(coverage)) %>%
+  group_by(Stream, HCO3, DIC) %>%
+  slice(which.max(coverage)) %>%
+  mutate(ratio = HCO3/DIC) %>%
+  ggplot(aes(x=class, y = ratio, color = Stream)) +
+  geom_jitter() +
+  labs(y = "Percent DIC that is HCO3") +
+  guides(color = FALSE)
+
+all_chemistry_DIC %>%
+  bind_cols(all_chemistry %>%
+              select(Stream, Date)) %>%
+  left_join(SEAKDB_match, by="Stream") %>%
+  left_join(all_DIC_Litho[,1:20], by="WS_ID") %>%
+  select(Stream, HCO3,DIC, ss, ig, pi, sm, pa, vi, vb, mt, pb, sc, nd, su, va, py, wb, ev, cl, pb, sc, nd, su, va, py, wb, ev, cl) %>%
+  pivot_longer(-c(HCO3,DIC,Stream), names_to = "class", values_to = "coverage") %>%
+  filter(!is.na(coverage)) %>%
+  group_by(Stream, HCO3, DIC) %>%
+  slice(which.max(coverage)) %>%
+  mutate(ratio = HCO3/DIC) %>%
+  mutate(class_merged = case_when(class == "pa" ~ "plutonics",
+                                  class == "pb" ~ "plutonics",
+                                  class == "pi" ~ "plutonics",
+                                  class == "py" ~ "volcanic",
+                                  class == "sc" ~ "sedimentary",
+                                  class == "sm" ~ "sedimentary",
+                                  class == "ss" ~ "sedimentary",
+                                  class == "su" ~ "unconsolidated",
+                                  class == "va" ~ "volcanic",
+                                  class == "vb" ~ "volcanic",
+                                  class == "vi" ~ "volcanic",
+                                  class == "wb" ~ "water")) %>%
+  ggplot(aes(x = class_merged, y = ratio)) +
+  geom_boxplot() +
+    labs(y = "Percent DIC that is HCO3") 
+
+
+
+
+```
+
+```{r, echo =FALSE}
+ws_vars <- readxl::read_xlsx(here("SEAKDB", "TABLE_A_Watershed_variables_for_SEAKDB_DOC_flux_estimates.xlsx"), sheet = "Watershed_variables")
+flux_estimates %>%
+  leleft_join()
+
+SEAKDB %>%
+  select(WS_ID, SHAPE_Area) %>%
+  st_drop_geometry() %>%
+  right_join(flux_estimates, by="WS_ID") %>%
+  group_by(WS_ID, SHAPE_Area, clust) %>%
+  summarise(TotalFlux = sum(Flux)) %>%
+  left_join(ws_vars, by = "WS_ID") %>%
+  filter(!is.na(clust)) %>%
+  mutate(yield = (TotalFlux / 1000) / Area_m2) %>%
+  ggplot(aes(x = Slp0_5, y = yield)) +
+  geom_point(aes(color = clust)) +
+  geom_smooth(method = "glm", formula = y ~ splines::bs(x,2)) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(y = "Yield in g per m2", x = "Percent slope 0-5 degrees") +
+  ggsave("slope.png")
+
+slope <- readxl::read_xlsx(here("SEAKDB", "MeanSlope_by_watershed.xlsx"), sheet = "MeanSlope_by_watershed")
+
+SEAKDB %>%
+  select(WS_ID, SHAPE_Area) %>%
+  st_drop_geometry() %>%
+  right_join(flux_estimates, by="WS_ID") %>%
+  left_join(slope, by = "WS_ID") %>%
+  group_by(WS_ID, karstFlag, clust, SHAPE_Area, MEAN) %>%
+  summarise(TotalFlux = sum(Flux)) %>%
+  mutate(yield = TotalFlux / SHAPE_Area) %>%
+  filter(!is.na(clust)) %>%
+  ggplot(aes(x = MEAN, y = yield / 1000)) +
+  geom_point(aes(color = clust)) +
+  geom_smooth(method = "lm", formula = y ~ poly(x,3)) +
+  labs(y = "Yield in g per m2", x = "Avg slope") +
+  ggsave("slope.png")
+
+
+SEAKDB %>%
+  select(WS_ID, SHAPE_Area) %>%
+  st_drop_geometry() %>%
+  right_join(flux_estimates, by="WS_ID") %>%
+  left_join(slope, by = "WS_ID") %>%
+  group_by(WS_ID, karstFlag, clust, SHAPE_Area, MEAN) %>%
+  summarise(TotalDis = sum(discharge)) %>%
+  filter(!is.na(clust)) %>%
+  ggplot(aes(x=MEAN, y = TotalDis, color = clust)) +
   geom_point() +
   scale_y_log10() +
-  scale_x_log10() +
-  geom_abline() +
-  labs(x="Alkalinity (measured)", y="Alkalinity (calculated)")
+  geom_smooth(method = "lm") +
+  labs(x = "Average slope") +
+  facet_wrap(~clust, scales = "free", ncol = 1) +
+  ggsave("slopes.png")
 
-```
-
-# Lithology from Frances
-
-```{r, echo=FALSE, message=FALSE, warning=FALSE}
-
-
-all_chem_dic %>%
-  left_join(litho_summary, by=c("OBJECTID" = "WS_ID")) %>%
-  select(OBJECTID, DIC, AX, CG, CPC, ST, WR, YT) %>%
-  pivot_longer(-c(DIC, OBJECTID)) %>%
-  group_by(OBJECTID) %>%
-  slice(which.max(value)) %>%
-  select(OBJECTID, name) -> major_group
-  
-all_chem_dic %>%
-  left_join(major_group, by=c("OBJECTID")) %>%
-  ggplot(aes(x=name, y=DIC)) +
-  geom_violin() +
-  labs(y="DIC", x="Major constituent") +
-   stat_summary(fun.data = give.n, geom = "text", fun.y = median,
-                  position = position_dodge(width = 0.75)) 
- 
 ```
