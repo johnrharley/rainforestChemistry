@@ -150,7 +150,7 @@ bind_cols(S1 = s1$DIC, S0 = s0$DIC) %>%
   scale_y_log10() +
   theme_bw() +
   labs(y="DIC where S=0", x="DIC where S=1", title="DIC calculation", subtitle = "using Waters et al. (2014)") +
-  annotate(geom = "text", x=20, y=1190, label = paste0("average difference ", round(annotateLayer$avgPercent), "%"), hjust=0)
+  annotate(geom = "text", x=20, y=1190, label = paste0("average difference ", round(annotateLayer$avgPercent), "%"), hjust=0) 
 ```
 
 There is some disagreement between DIC estimated for S=0 and S=1, which is unsurprising. However I wanted to get a sense for how the values from Waters et al. (2014) compared to the only source that was available for freshwater, [Millero 1979](https://www.sciencedirect.com/science/article/abs/pii/001670379400354O). Unfortunately that reference is not available in *seacarb* however it is available in Matlab *CO2SYS*. I don't have Matlab so I had Mariela calculate the values using that reference and I compared them to the values calculated at S=0 using Waters et al. (2014).
@@ -173,7 +173,9 @@ comparisonData %>%
   theme_bw() +
   labs(y="DIC where S=0 using Waters et al. (2014)", x="DIC where S=0 Millero et al. (1979)", title="DIC calculation", 
        subtitle = "Waters (2014) vs. Millero (1979)") +
-  annotate(geom = "text", x=20, y=1190, label = paste0("average difference ", round(mean(comparisonData$Percentdiffernce),2), "%"), hjust=0)
+  annotate(geom = "text", x=20, y=1190, label = paste0("average difference ", 
+                                                       round(mean(comparisonData$Percentdiffernce),2), "%"), hjust=0) +
+  ggsave("qa.png", height = 4, width = 6, dpi=300)
 
 ```
 
