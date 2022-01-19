@@ -196,7 +196,45 @@ drainageRunoff %>%
   mutate(PercentDischarge = TotalDischarge / sum(TotalDischarge))
 
 ```
-percent watershed > 40?
 
-http://ckan.snap.uaf.edu/dataset/a-continuous-transboundary-50-meter-dem-for-the-alaska-perhumid-coastal-temperate-rainforest-ak
+cluster figure
+```{r, echo=FALSE, warning=FALSE, echo=FALSE, results='hide'}
+require(sf)
+require(ggspatial)
+SEAKDB <- read_sf(here("SEAKDB","SEAKDB.shp"))
+SEAKDB <- st_transform(SEAKDB, crs = "EPSG:4326")
+world <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  st_make_valid() %>%
+  st_crop(y =  st_bbox(SEAKDB))
+
+
+
+bbox <- c(left = -140, bottom = 53.5, right = -126, top = 62)
+ak_map <- get_stamenmap(bbox, zoom = 7)
+
+clust_dat <- SEAKDB %>%
+  left_join(clust, by="WS_ID") %>%
+  filter(!is.na(clust)) 
+clust_dat <- st_transform(clust_dat, crs = 4326)
+
+hillshade <- paste0('http://a.tile.stamen.com/terrain-background/${z}/${x}/${y}.png')
+rosm::osm.types()
+ggm <- ggplot() +
+    annotation_map_tile(type = hillshade,
+                      progress = "none", zoom = 7) +  
+  geom_sf(data = clust_dat, aes(fill = clust), alpha=1, inherit.aes = FALSE)  +
+  coord_sf(datum = NA) +
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = "#9acdd9")) +
+  scale_fill_manual(values = c("#999999", "#56B4E9",  "#E69F00"), 
+                    labels = c("glacial","snow and rain", "rain")) +
+  theme(legend.text = element_text(size = 11)) +
+  labs(fill = "") +
+  theme(legend.position = c(0.22, 0.3)) 
+
+
+ggsave(plot = ggm, filename = "ggm.png", dpi=300)
+```
+
+yield figure
 

@@ -19,6 +19,7 @@ require(tidyverse)
 require(here)
 require(seacarb)
 require(dataRetrieval)
+require(ggspatial)
 require(ggmap)
 require(sf)
 require(leaflet)  
@@ -871,6 +872,8 @@ southeast_chemistry %>%
 library(tmap)
 library(raster)
 library(ceramic)
+
+SEAKDB <- st_make_valid(SEAKDB)
 Sys.setenv(MAPBOX_API_KEY = "pk.eyJ1Ijoiam9obnJoYXJsZXkiLCJhIjoiY2tuaHo3aXBtMDl5YzJwcXJ5NTJqMjhsZSJ9.zm05WpFcoRicdpF1U7V8rg")
 coast <- read_sf(here("SEAKDB/Alaska_Coast_Map_Service", "Alaska_Coast_Map_Service.shp"))
 SEAK <- st_bbox(SEAKDB)
@@ -882,8 +885,12 @@ dem <- projectRaster(dem, crs = "EPSG:4326")
 elevation <- crop(dem, SEAKDB)
 tmap_mode("plot")
 
-rivers <- read_sf(here("SEAKDB/HydroRIVERS_v10_na_shp/","HydroRIVERS_v10_na.shp"))
-rivers_ar <- read_sf(here("SEAKDB/HydroRIVERS_v10_ar_shp/","HydroRIVERS_v10_ar.shp"))
+rivers <- read_sf(here("SEAKDB/HydroRIVERS_v10_na_shp/","HydroRIVERS_v10_na.shp")) %>%
+  filter(ORD_STRA > 3)
+
+rivers_ar <- read_sf(here("SEAKDB/HydroRIVERS_v10_ar_shp/","HydroRIVERS_v10_ar.shp")) %>%
+  filter(ORD_STRA > 3)
+
 seak_riv <- st_intersection(bind_rows(rivers,rivers_ar), SEAKDB)
 
 maj_rivers <- seak_riv %>%
@@ -1253,7 +1260,7 @@ karst_dic <- all_chem_dic %>%
     mutate(WS_ID = ifelse(Stream == "15008000", 818, WS_ID)) %>%
     left_join(karst, by=c("WS_ID" = "wsid")) 
 
-karst <- karst_dic %>% 
+karst_fig <- karst_dic %>% 
   mutate(karstFlag = case_when(karst_cover_perc <= 0 ~ "0",
                                karst_cover_perc > 0  ~ "1")) %>% 
   filter(DIC < 30) %>%
@@ -1271,7 +1278,7 @@ karst <- karst_dic %>%
   scale_y_continuous(breaks = seq(0, 30, 5)) +
   guides(fill = FALSE) 
   
-ggsave("karst.png",karst, height=4, width=4, dpi=300)
+ggsave("karst.png",karst_fig, height=4, width=4, dpi=300)
 
   
 # random effect measure
@@ -1456,7 +1463,7 @@ drainageRunoff %>%
                            month == "NOV_Mean_RO_m3" ~ 11,
                            month == "DEC_Mean_RO_m3" ~ 12)) %>%
   left_join(clust, by="WS_ID") %>%
-  left_join(karst, by=c("WS_ID" = "wsid")) %>% 
+  left_join(karst, by=c("WS_ID"= "wsid")) %>% 
   mutate(karstFlag = ifelse(karst_cover_perc == "0", "No karst", ">0% karst")) %>%
   mutate(clust = case_when(clust == "1" ~ "glacial",
                            clust == "2" ~ "snow and rain", 
@@ -1489,11 +1496,18 @@ flux_estimates %>%
 sum(SEAKDB$SHAPE_Area)/1e9
 
 flux_estimates %>%
-  group_by(clust) %>%
+  group_by(clust, karstFlag) %>%
     summarise(totalFlux = sum(Flux, na.rm = TRUE)/1e15, area = sum(ws_area_sq_met, na.rm = TRUE)/12) %>%
   mutate(yield = totalFlux * 1e12 / area) %>%
   ungroup() %>%
   mutate(sum = sum(area, na.rm=TRUE))
+
+
+flux_estimates %>%
+  group_by(WS_ID) %>%
+    summarise(totalFlux = sum(Flux, na.rm = TRUE)/1e15, area = sum(ws_area_sq_met, na.rm = TRUE)/12) %>%
+    mutate(yield = totalFlux * 1e12 / area) %>%
+  arrange(desc(area))
 
 text_annotations <- flux_estimates %>% 
   group_by(clust, karstFlag) %>%
@@ -1526,6 +1540,8 @@ d <- flux_estimates %>%
   geom_text(aes(label = paste0("n=", n)), data = text_annotations)
 d
 ```
+
+
 
 Computing flux as CO2/HCO3
 
@@ -1570,16 +1586,21 @@ matchMarineZones %>%
   mutate(NAME = ifelse(WS_ID %in% StikineList, "Clarence Strait", NAME)) %>%
   select(WS_ID, ID, NAME) -> lowsPtsMatch
 
-SEAKDB %>%
+stamen <- paste0('http://a.tile.stamen.com/terrain-background/${z}/${x}/${y}.png')
+
+wsmap <- SEAKDB %>%
   left_join(lowsPtsMatch, by="WS_ID") %>%
   ggplot() +
+    annotation_map_tile(type = stamen,
+                      progress = "none", zoom = 7) +
   geom_sf(aes(fill = NAME), alpha=0.8) + 
   geom_sf(aes(fill = NAME), data = ak_zones, alpha=0.4) +
   theme_minimal() +
   theme(legend.text = element_text(size = 11)) +
   labs(fill = "") +
-  theme(legend.position = c(0.22, 0.3)) +
-  ggsave("WSmapAdjusted.png", height=12, width=14, dpi=300)
+  theme(legend.position = c(0.22, 0.3))
+
+ggsave(wsmap, "WSmapAdjusted.png", height=12, width=14, dpi=300)
 
 
 library(RColorBrewer)
